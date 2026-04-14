@@ -62,7 +62,6 @@
         },
         "homepage": {
           "type": "string",
-          "format": "uri",
           "description": "URL to documentation or source."
         },
         "tags": {
@@ -125,7 +124,7 @@
         "fix": { "$ref": "#/$defs/fix" },
         "references": {
           "type": "array",
-          "items": { "type": "string", "format": "uri" },
+          "items": { "type": "string" },
           "description": "URLs to documentation or rationale."
         },
         "tests": {
