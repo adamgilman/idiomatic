@@ -1,0 +1,40 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: test-pack
+  name: Test Pack
+  version: 0.1.0
+  description: Test pack.
+  maintainer: test
+
+rules:
+  - id: same-id
+    name: First rule
+    description: First rule.
+    rationale: Testing.
+    severity: error
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: x
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Fix it.
+
+  - id: same-id
+    name: Second rule
+    description: Second rule with same id.
+    rationale: Testing.
+    severity: warning
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: y
+    applies_to:
+      - "**/*.ts"
+    fix:
+      message: Fix it.

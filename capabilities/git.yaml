@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: git
+  version: 1.0.0
+  description: Wrapper around the git CLI. Rules supply argv and a fire_when expression that queries stdout/stderr/exit_code.
+
+spec:
+  # Repository-level checks fire regardless of which file triggered the scan.
+  applies_to_files:
+
+  requires:
+    binary: git
+    install: "your system package manager"
+
+  inputs:
+    argv:
+      type: list
+      required: true
+      description: argv passed to git (after the binary name)
+    fire_when:
+      type: string
+      required: true
+      description: Expression evaluated against the scalar signal — see firewhen.go grammar
+
+  run:
+    per: rule
+    argv: []
+    rule_argv_field: argv
+    timeout: 5s
+    ok_exit: [0, 1, 128]
+    output: stdout
+
+  signal:
+    shape: scalar
+    scalar_fields:
+      stdout:    { from: stdout, transform: trim }
+      stderr:    { from: stderr, transform: trim }
+      exit_code: { from: exit }
+    fixed_file: "{project}/.git/HEAD"

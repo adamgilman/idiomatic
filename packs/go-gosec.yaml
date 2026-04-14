@@ -1,0 +1,444 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-gosec
+  name: Go Gosec Security
+  version: 0.1.0
+  description: >
+    Deep Go security analysis powered by gosec. Catches vulnerabilities
+    through AST analysis that pattern-matching tools miss — taint
+    tracking for SQL injection, crypto primitive misuse, file permission
+    issues, and unsafe operations.
+  descriptions:
+    business: >
+      Your Go services handle sensitive data and run in production. This
+      pack uses gosec, the Go community's dedicated security scanner, to
+      catch vulnerabilities that simple pattern matching misses. Gosec
+      understands Go's type system and can trace how data flows through
+      your code to find injection points, weak cryptography, and unsafe
+      operations that create real attack surface.
+    developer: >
+      This pack wraps gosec, which does AST-level security analysis on Go
+      code. Unlike pattern-matching (semgrep), gosec understands Go's type
+      system, tracks data flow, and catches issues like subtle crypto
+      misuse or file permissions that require semantic understanding. Each
+      rule maps to a gosec rule ID (G1xx-G6xx) with our own fix guidance.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-gosec.yaml
+  tags:
+    language: go
+    vendor: gosec
+    category: security
+    architecture: [services, workers, libraries]
+
+rules:
+  # ── Credential Detection ───────────────────────────────────────
+
+  - id: go-gosec-hardcoded-credentials
+    name: Hardcoded credentials in source
+    description: >
+      Flags variables with names suggesting credentials (password, secret,
+      token) assigned string literal values.
+    descriptions:
+      business: >
+        Gosec found a password or secret hardcoded in the source code.
+        This is the simplest form of credential leak — anyone with repo
+        access can read production secrets. Automated scanners routinely
+        find and exploit these.
+      developer: >
+        G101 fires when a variable named password/secret/token/etc is
+        assigned a string literal. Gosec uses entropy analysis to reduce
+        false positives. Move credentials to env vars or a secret store.
+    rationale: >
+      Gosec's G101 rule uses a combination of variable name heuristics and
+      Shannon entropy analysis to detect hardcoded credentials. This
+      catches cases that simple regex patterns miss — like secrets assigned
+      to variables through multi-step assignment.
+    severity: error
+    tags: [gosec, credentials, owasp]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G101
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Move credentials to environment variables or a secret store.
+      example: |
+        // Before — gosec G101
+        var dbPassword = "super-secret-password"
+
+        // After
+        var dbPassword = os.Getenv("DB_PASSWORD")
+    references:
+      - https://github.com/securego/gosec#available-rules
+      - https://cwe.mitre.org/data/definitions/798.html
+
+  # ── SQL Injection ──────────────────────────────────────────────
+
+  - id: go-gosec-sql-string-concat
+    name: SQL injection via string concatenation
+    description: >
+      Flags SQL queries built with string concatenation that gosec
+      identifies through taint analysis.
+    descriptions:
+      business: >
+        Gosec's taint analysis traced user input flowing into a SQL query
+        through string concatenation. This is a confirmed SQL injection
+        path — an attacker can read, modify, or delete your entire
+        database through this code.
+      developer: >
+        G201 fires when gosec traces a variable into a SQL query via
+        string concatenation. Unlike regex patterns, gosec follows the
+        data flow — it catches cases where the concatenation happens in a
+        helper function called by the query. Use parameterized queries.
+    rationale: >
+      Gosec's G201 performs taint tracking to identify SQL injection via
+      string concatenation. It follows variable assignments across function
+      boundaries, catching injection paths that regex-based scanners miss.
+    severity: error
+    tags: [gosec, sql-injection, owasp, taint-analysis]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G201
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use parameterized queries instead of string concatenation.
+      example: |
+        // Before — G201: SQL injection
+        query := "SELECT * FROM users WHERE id = " + userID
+        db.Query(query)
+
+        // After
+        db.Query("SELECT * FROM users WHERE id = $1", userID)
+    references:
+      - https://cwe.mitre.org/data/definitions/89.html
+
+  - id: go-gosec-sql-string-format
+    name: SQL injection via string formatting
+    description: >
+      Flags SQL queries built with fmt.Sprintf or similar string
+      formatting functions.
+    descriptions:
+      business: >
+        Gosec found a database query built using string formatting — a
+        different flavor of the same SQL injection vulnerability. The
+        result is identical: attackers can manipulate your database through
+        crafted input.
+      developer: >
+        G202 catches fmt.Sprintf used to build SQL queries. This is the
+        same class of vulnerability as G201 but through formatting instead
+        of concatenation. The fix is the same: parameterized queries.
+    rationale: >
+      G202 catches SQL injection via fmt.Sprintf and similar formatting
+      functions. While the mechanism differs from concatenation, the
+      vulnerability is identical — user input becomes part of the SQL
+      syntax.
+    severity: error
+    tags: [gosec, sql-injection, owasp]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G202
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use parameterized queries instead of fmt.Sprintf for SQL.
+    references:
+      - https://cwe.mitre.org/data/definitions/89.html
+
+  # ── Command Injection ──────────────────────────────────────────
+
+  - id: go-gosec-command-injection
+    name: Subprocess launched with variable input
+    description: >
+      Flags exec.Command or exec.CommandContext where arguments come from
+      variables rather than string literals.
+    descriptions:
+      business: >
+        Gosec found code that runs system commands using variable input.
+        If any of that input comes from a user, an attacker can run
+        arbitrary commands on your server — reading files, installing
+        malware, or pivoting to other systems on your network.
+      developer: >
+        G204 fires when exec.Command receives non-literal arguments.
+        Gosec can't prove the input is user-controlled, but variable
+        arguments in exec.Command are a code smell. Validate arguments
+        against an allowlist, or better, replace the shell-out with a
+        Go library.
+    rationale: >
+      G204 identifies subprocess launches with variable arguments. While
+      not every instance is exploitable, variable arguments in
+      exec.Command represent an attack surface that should be minimized.
+      Gosec flags these for manual review.
+    severity: error
+    tags: [gosec, command-injection, owasp]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G204
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Validate arguments against an allowlist or replace exec.Command with a Go library.
+    references:
+      - https://cwe.mitre.org/data/definitions/78.html
+
+  # ── File Permissions ───────────────────────────────────────────
+
+  - id: go-gosec-file-permissions-mkdir
+    name: Directory created with excessive permissions
+    description: >
+      Flags os.Mkdir or os.MkdirAll with permissions more permissive
+      than 0750.
+    descriptions:
+      business: >
+        This code creates a directory with permissions that allow other
+        users on the system to read or write to it. In a shared hosting
+        or container environment, this can expose sensitive data to other
+        processes.
+      developer: >
+        G301 fires when os.Mkdir/MkdirAll uses permissions wider than
+        0750. Use 0750 (owner rwx, group rx) or 0700 (owner only) for
+        directories that contain application data.
+    rationale: >
+      Directories with world-readable or world-writable permissions
+      allow other users and processes on the system to access their
+      contents. In containerized environments, this is less critical but
+      still violates least-privilege principles.
+    severity: warning
+    tags: [gosec, file-permissions, least-privilege]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G301
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use 0750 or 0700 permissions for directories.
+      example: |
+        // Before — G301: world-readable directory
+        os.MkdirAll("/app/data", 0777)
+
+        // After
+        os.MkdirAll("/app/data", 0750)
+    references:
+      - https://cwe.mitre.org/data/definitions/276.html
+
+  - id: go-gosec-file-permissions-write
+    name: File written with excessive permissions
+    description: >
+      Flags os.WriteFile or os.OpenFile with permissions more permissive
+      than 0640.
+    descriptions:
+      business: >
+        This code creates files that other users on the system can read
+        or modify. If the file contains configuration, credentials, or
+        user data, this is a data exposure risk.
+      developer: >
+        G306 fires when os.WriteFile uses permissions wider than 0640.
+        Use 0640 (owner rw, group r) or 0600 (owner only) for files.
+    rationale: >
+      Files with world-readable permissions expose their contents to all
+      processes on the system. Files with world-writable permissions can
+      be modified by any process, potentially injecting malicious content.
+    severity: warning
+    tags: [gosec, file-permissions, least-privilege]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G306
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use 0640 or 0600 permissions for files.
+      example: |
+        // Before — G306: world-readable file
+        os.WriteFile("config.json", data, 0666)
+
+        // After
+        os.WriteFile("config.json", data, 0600)
+    references:
+      - https://cwe.mitre.org/data/definitions/276.html
+
+  # ── Cryptography ───────────────────────────────────────────────
+
+  - id: go-gosec-weak-crypto
+    name: Weak cryptographic primitive used
+    description: >
+      Flags usage of known weak cryptographic algorithms (DES, RC4, MD4).
+    descriptions:
+      business: >
+        This code uses a cryptographic algorithm that has been broken by
+        security researchers. Data encrypted or hashed with this algorithm
+        can be decrypted or forged by attackers. This is a compliance
+        violation for PCI DSS, HIPAA, and SOC 2.
+      developer: >
+        G401 fires for DES, RC4, MD4 usage. These have practical attacks.
+        Use AES-GCM for encryption, SHA-256+ for hashing, and
+        bcrypt/argon2 for passwords.
+    rationale: >
+      G401 identifies usage of cryptographic primitives with known
+      practical attacks. DES has a 56-bit key (brute-forceable), RC4 has
+      statistical biases, and MD4 has practical collision attacks.
+    severity: error
+    tags: [gosec, cryptography, compliance]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G401
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use AES-GCM for encryption, SHA-256+ for hashing.
+    references:
+      - https://cwe.mitre.org/data/definitions/327.html
+
+  - id: go-gosec-import-md5
+    name: Import of crypto/md5
+    description: >
+      Flags imports of the crypto/md5 package. MD5 is cryptographically
+      broken.
+    descriptions:
+      business: >
+        This code imports a hashing algorithm (MD5) that was broken in
+        2004. If used for security purposes, attackers can forge hash
+        values. This is a compliance finding in security audits.
+      developer: >
+        G501 fires on any import of crypto/md5. If you're using it for
+        non-security purposes (cache keys, checksums), consider adding a
+        gosec:ignore comment with justification. For security use, switch
+        to crypto/sha256.
+    rationale: >
+      MD5 has practical collision attacks since 2004. Importing the
+      package is a strong signal of potential security misuse. Even for
+      non-security purposes, SHA-256 has negligible performance difference
+      on modern hardware.
+    severity: error
+    tags: [gosec, cryptography, md5]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G501
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Replace crypto/md5 with crypto/sha256.
+    references:
+      - https://cwe.mitre.org/data/definitions/328.html
+
+  - id: go-gosec-import-sha1
+    name: Import of crypto/sha1
+    description: >
+      Flags imports of the crypto/sha1 package. SHA1 has known collision
+      attacks.
+    descriptions:
+      business: >
+        This code imports a hashing algorithm (SHA1) that was broken by
+        Google's SHAttered attack in 2017. While harder to exploit than
+        MD5, it is deprecated for security use.
+      developer: >
+        G505 fires on crypto/sha1 imports. SHA1 has practical collision
+        attacks (SHAttered, 2017). For git commit hashes and legacy
+        compatibility, it may be acceptable with a gosec:ignore comment.
+        For security use, switch to crypto/sha256.
+    rationale: >
+      SHA1 has practical collision attacks since Google's SHAttered in
+      2017. Major browsers, certificate authorities, and NIST all
+      deprecated it. Use SHA-256 or SHA-3.
+    severity: warning
+    tags: [gosec, cryptography, sha1]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G505
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Replace crypto/sha1 with crypto/sha256.
+    references:
+      - https://shattered.io/
+      - https://cwe.mitre.org/data/definitions/328.html
+
+  # ── TLS ────────────────────────────────────────────────────────
+
+  - id: go-gosec-tls-insecure
+    name: TLS with insecure minimum version
+    description: >
+      Flags tls.Config with MinVersion set below TLS 1.2, or without
+      MinVersion set at all.
+    descriptions:
+      business: >
+        This code allows connections using outdated encryption that has
+        known vulnerabilities (TLS 1.0/1.1). This is a PCI DSS compliance
+        violation and makes your connections vulnerable to interception.
+      developer: >
+        G402 fires when tls.Config doesn't set MinVersion to at least
+        tls.VersionTLS12. The default allows TLS 1.0 which has BEAST and
+        POODLE attacks. Set MinVersion: tls.VersionTLS12 or
+        tls.VersionTLS13.
+    rationale: >
+      G402 identifies TLS configurations that allow deprecated protocol
+      versions. TLS 1.0 and 1.1 are deprecated by RFC 8996 and have
+      practical attacks. PCI DSS requires TLS 1.2 minimum.
+    severity: error
+    tags: [gosec, tls, compliance]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G402
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Set MinVersion to tls.VersionTLS12 or tls.VersionTLS13.
+      example: |
+        // Before — G402: allows TLS 1.0
+        tlsConfig := &tls.Config{}
+
+        // After
+        tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+    references:
+      - https://datatracker.ietf.org/doc/rfc8996/
+      - https://cwe.mitre.org/data/definitions/327.html
+
+  # ── Error Handling ─────────────────────────────────────────────
+
+  - id: go-gosec-unhandled-error
+    name: Error return value not checked
+    description: >
+      Flags function calls where the error return value is explicitly
+      discarded or ignored.
+    descriptions:
+      business: >
+        This code ignores an error that a function returns — it's like
+        ignoring a warning light on your dashboard. The operation may have
+        failed, but your code continues as if it succeeded. This leads to
+        corrupted data, partial operations, and bugs that are nearly
+        impossible to diagnose.
+      developer: >
+        G104 fires when an error return is discarded. This is often a
+        deferred Close() where the error is genuinely unactionable — add a
+        gosec:ignore comment in those cases. For everything else, handle
+        the error or propagate it.
+    rationale: >
+      G104 identifies unchecked error returns. In Go, errors are values
+      that must be checked. Ignoring them leads to silent failures that
+      corrupt state. Gosec catches this at the AST level, including cases
+      where the error is assigned to _ .
+    severity: warning
+    tags: [gosec, error-handling]
+    detector:
+      capability: gosec
+      config:
+        rule_id: G104
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Check the error return value. Use gosec:ignore with justification if genuinely unactionable.
+    references:
+      - https://cwe.mitre.org/data/definitions/391.html

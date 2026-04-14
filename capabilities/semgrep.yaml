@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: semgrep
+  version: 1.0.0
+  description: Semantic pattern matcher for many languages
+
+spec:
+  requires:
+    binary: semgrep
+    install: "uv tool install semgrep"
+
+  # Inputs mirror the existing pack rule shape so packs do not need migration
+  # in this PR. Each rule's inputs become a YAML rule entry that semgrep
+  # consumes via --config.
+  inputs:
+    language:
+      type: string
+      required: true
+    pattern:             { type: any }
+    patterns:            { type: any }
+    pattern-either:      { type: any }
+    pattern-not:         { type: any }
+    pattern-not-inside:  { type: any }
+    pattern-inside:      { type: any }
+    metavariable-regex:  { type: any }
+    metavariable-pattern: { type: any }
+
+  run:
+    per: batch
+    config_file:
+      path: "{tmp}/idio-semgrep-rules.yaml"
+      # Use JSON-as-YAML for embedded values: it sidesteps multi-line scalar
+      # indentation pitfalls and YAML 1.2 accepts it natively. keys|sortAlpha
+      # gives deterministic output for golden tests.
+      template: |
+        rules:
+        {{- range .Rules }}
+        {{- $r := . }}
+          - id: {{ $r.ID }}
+            message: {{ $r.Fix.Message | quote }}
+            severity: {{ $r.Severity | upper }}
+            languages: [{{ index $r.Inputs "language" }}]
+        {{- range $key := keys $r.Inputs | sortAlpha }}
+        {{- if ne $key "language" }}
+            {{ $key }}: {{ index $r.Inputs $key | toJson }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+    argv:
+      - scan
+      - --config
+      - "{config_file}"
+      - --json
+      - --no-git-ignore
+      - "{files}"
+    timeout: 60s
+    ok_exit: [1]            # exit 1 = findings found, normal
+    output: stdout
+
+  signal:
+    shape: list
+    source: stdout
+    format: json
+    list: results
+    match_rule_by:
+      from: check_id
+      transform: tail_after_dot
+    fields:
+      file:     path
+      line:     start.line
+      col:      start.col
+      end_line: end.line
+      end_col:  end.col
+      message:  extra.message
+      severity: extra.severity
+    severity_map:
+      ERROR: error
+      WARNING: warning
+      INFO: info

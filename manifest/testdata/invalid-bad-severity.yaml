@@ -1,0 +1,25 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: test-pack
+  name: Test Pack
+  version: 0.1.0
+  description: Test pack.
+  maintainer: test
+
+rules:
+  - id: bad-severity
+    name: Bad severity rule
+    description: This rule has a bad severity.
+    rationale: Testing severity validation.
+    severity: critical
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: x
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Fix it.

@@ -1,0 +1,22 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: bad-pack
+  name: ""
+  version: ""
+  description: ""
+  maintainer: ""
+
+rules:
+  - id: ""
+    name: ""
+    description: ""
+    rationale: ""
+    severity: ""
+    detector:
+      backend: ""
+      id: ""
+    applies_to: []
+    fix:
+      message: ""

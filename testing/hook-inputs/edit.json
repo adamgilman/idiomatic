@@ -1,0 +1,8 @@
+{
+  "session_id": "test-session",
+  "cwd": "__CWD__",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {"file_path": "__FILE__"},
+  "tool_response": {}
+}

@@ -1,0 +1,1146 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: typescript-starter
+  name: TypeScript Starter
+  version: 0.1.0
+  description: >
+    Foundational TypeScript rules covering type safety, async patterns,
+    and modern idioms. Everything a TypeScript project needs to stay
+    idiomatic from day one, without requiring team discussion to adopt.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/typescript-starter.yaml
+
+rules:
+  # ──────────────────────────────────────────────────────────────
+  # Type Safety
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-no-explicit-any
+    name: No explicit any
+    description: |
+      Flags any variables, parameters, or return types explicitly
+      typed as `any` instead of using a proper type.
+    rationale: |
+      The whole point of TypeScript is to provide compile-time type
+      checking. Using `any` defeats this protection and makes code
+      harder to refactor and understand. It also silences IDE hints.
+      Use `unknown` when you genuinely don't know the type, or use
+      a union type when you know the possibilities.
+    severity: error
+    tags:
+      - type-safety
+      - typescript
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-explicit-any"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Replace any with unknown or a specific type.
+      example: |
+        // Before
+        function process(data: any): any {
+            return data.value;
+        }
+
+        // After
+        function process(data: unknown): string | null {
+            if (typeof data === 'object' && data !== null && 'value' in data) {
+                return String(data.value);
+            }
+            return null;
+        }
+
+    references:
+      - https://www.typescriptlang.org/docs/handbook/2/types-from-types.html
+
+  - id: ts-no-non-null-assertion
+    name: No non-null assertion
+    description: |
+      Flags the non-null assertion operator (!) used to suppress
+      TypeScript's null/undefined check.
+    rationale: |
+      Non-null assertions are a code smell. They tell TypeScript to
+      "trust me" without verifying. If the value is actually null,
+      you'll get a runtime error. Use proper narrowing (typeof checks,
+      optional chaining, nullish coalescing) to make the type safe
+      rather than bypassing the compiler.
+    severity: warning
+    tags:
+      - type-safety
+      - null-safety
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-non-null-assertion"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use type narrowing instead of non-null assertion.
+      example: |
+        // Before
+        const user = getUser();
+        console.log(user!.name);
+
+        // After
+        const user = getUser();
+        if (user) {
+            console.log(user.name);
+        }
+
+    references:
+      - https://www.typescriptlang.org/docs/handbook/2/narrowing.html
+
+  - id: ts-no-unnecessary-type-assertion
+    name: No unnecessary type assertion
+    description: |
+      Flags type assertions (e.g., `value as Type`) that are
+      redundant because the value already has that type.
+    rationale: |
+      Unnecessary assertions clutter code and can hide type errors
+      during refactoring. They also indicate the codebase may not
+      trust its own types. Remove them to keep types honest.
+    severity: warning
+    tags:
+      - type-safety
+      - readability
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unnecessary-type-assertion"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Remove the type assertion if the type is already correct.
+      example: |
+        // Before
+        const value: string = "hello";
+        const result = value as string;
+
+        // After
+        const value: string = "hello";
+        const result = value;
+
+    references:
+      - https://www.typescriptlang.org/docs/handbook/2/types-from-types.html
+
+  # ──────────────────────────────────────────────────────────────
+  # Type Safety — any escape prevention
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-no-unsafe-return
+    name: No unsafe return
+    description: |
+      Flags functions that return a value typed as `any`. Returning `any`
+      silently discards type information and poisons callers.
+    rationale: |
+      A function returning `any` breaks the type contract for every caller.
+      If you don't know the return type, use `unknown` and let callers narrow it.
+      If you do know it, annotate it. There is no valid reason to return `any`.
+    severity: error
+    tags:
+      - type-safety
+      - any-prevention
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unsafe-return"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Annotate the return type explicitly or use unknown instead of any.
+      example: |
+        // Before
+        function parse(input: string): any {
+            return JSON.parse(input);
+        }
+
+        // After
+        function parse(input: string): unknown {
+            return JSON.parse(input);
+        }
+
+  - id: ts-no-unsafe-call
+    name: No unsafe call
+    description: |
+      Flags calls to values typed as `any`. Calling `any` bypasses
+      TypeScript's call signature checks entirely.
+    rationale: |
+      When you call an `any`-typed value, TypeScript cannot verify the
+      argument types, return type, or even that it's callable. This silences
+      real errors. If something is callable, give it a proper function type.
+    severity: error
+    tags:
+      - type-safety
+      - any-prevention
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unsafe-call"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Type the callable properly instead of allowing any to be called.
+      example: |
+        // Before
+        const fn: any = getHandler();
+        fn(payload);
+
+        // After
+        const fn: (payload: Payload) => void = getHandler();
+        fn(payload);
+
+  - id: ts-no-unsafe-member-access
+    name: No unsafe member access
+    description: |
+      Flags property or method access on values typed as `any`. Member
+      access on `any` produces more `any`, propagating the type hole.
+    rationale: |
+      Accessing `.foo` on an `any`-typed value yields `any`, which then
+      propagates through the entire call chain. Each access is an opportunity
+      for a runtime error that TypeScript can't warn you about.
+    severity: error
+    tags:
+      - type-safety
+      - any-prevention
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unsafe-member-access"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Narrow the type or use a type assertion to a known type before accessing members.
+      example: |
+        // Before
+        function getName(obj: any): string {
+            return obj.name;
+        }
+
+        // After
+        function getName(obj: { name: string }): string {
+            return obj.name;
+        }
+
+  - id: ts-no-unsafe-assignment
+    name: No unsafe assignment
+    description: |
+      Flags assignments where an `any` value is assigned to a typed variable
+      or property, silently widening the type to `any`.
+    rationale: |
+      Assigning `any` to a typed slot defeats the type annotation. TypeScript
+      accepts it silently, but the runtime value could be anything. Use a
+      type assertion to a known type or restructure to avoid the `any` source.
+    severity: error
+    tags:
+      - type-safety
+      - any-prevention
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unsafe-assignment"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Narrow or assert to a specific type before assigning.
+      example: |
+        // Before
+        const data = JSON.parse(response) as any;
+        const user: User = data;
+
+        // After
+        const data: unknown = JSON.parse(response);
+        const user: User = data as User; // validate with a type guard in production
+
+  - id: ts-no-unsafe-argument
+    name: No unsafe argument
+    description: |
+      Flags passing `any`-typed values as arguments to typed function parameters.
+      This bypasses argument type validation.
+    rationale: |
+      Passing `any` to a typed function is the same as removing the parameter
+      type. The function author wrote a contract; passing `any` ignores it.
+      Narrow the value or assert to the expected type before passing.
+    severity: error
+    tags:
+      - type-safety
+      - any-prevention
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unsafe-argument"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Narrow or assert the argument to the expected type before passing.
+      example: |
+        // Before
+        function process(user: User): void { }
+        const data: any = fetchData();
+        process(data);
+
+        // After
+        const data: unknown = fetchData();
+        if (isUser(data)) {
+            process(data);
+        }
+
+  - id: ts-prefer-as-const
+    name: Prefer as const
+    description: |
+      Flags type assertions on literals that would be better expressed
+      with `as const`, which preserves the literal type and applies
+      `readonly` recursively.
+    rationale: |
+      Writing `{ direction: 'left' as 'left' }` is verbose and only applies
+      to one field. `{ direction: 'left' } as const` is cleaner, applies to
+      the entire object, and marks it readonly — preventing accidental mutation.
+      Use `as const` to express "this is a fixed value, not a widened type."
+    severity: warning
+    tags:
+      - type-safety
+      - modern
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-as-const"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use as const instead of a literal type assertion.
+      example: |
+        // Before
+        const config = { direction: 'left' as 'left', speed: 10 as 10 };
+
+        // After
+        const config = { direction: 'left', speed: 10 } as const;
+
+  - id: ts-no-redundant-type-constituents
+    name: No redundant type constituents
+    description: |
+      Flags union or intersection type members that are redundant given
+      the other members — such as `string | string`, `never | T`, or
+      `unknown & T`.
+    rationale: |
+      Redundant type constituents are noise that obscures intent and signals
+      incomplete refactoring. `never | T` simplifies to `T`. `unknown & T`
+      simplifies to `T`. `string | string` is just `string`. Clean types
+      communicate clean thinking.
+    severity: warning
+    tags:
+      - type-safety
+      - readability
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-redundant-type-constituents"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Remove the redundant type constituent.
+      example: |
+        // Before
+        type Status = 'active' | 'inactive' | 'active';
+        type Value = never | string;
+
+        // After
+        type Status = 'active' | 'inactive';
+        type Value = string;
+
+  # ──────────────────────────────────────────────────────────────
+  # Async and Promises
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-no-floating-promises
+    name: No floating promises
+    description: |
+      Flags promises that are created but not awaited, caught, or
+      explicitly ignored with a void cast. This catches accidental
+      fire-and-forget code.
+    rationale: |
+      A promise without await is like a statement that does nothing.
+      Its rejection will silently fail and potentially go unnoticed
+      until a user encounters an error. Either await it, chain .catch(),
+      or explicitly mark it void if you intend to fire-and-forget.
+    severity: error
+    tags:
+      - async
+      - error-handling
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-floating-promises"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Await the promise, add error handling, or cast to void.
+      example: |
+        // Before
+        async function loadUser() {
+            fetchUser(id);
+        }
+
+        // After
+        async function loadUser() {
+            await fetchUser(id);
+        }
+
+    references:
+      - https://typescript-eslint.io/rules/no-floating-promises/
+
+  - id: ts-no-misused-promises
+    name: No misused promises
+    description: |
+      Flags async functions passed in contexts where a synchronous callback
+      or boolean is expected — such as `if (asyncFn())`, event handlers
+      expecting void returns, or array methods like forEach.
+    rationale: |
+      An async function always returns a Promise. Passing one where a boolean
+      is expected means the condition is always truthy (the Promise object).
+      Passing one to forEach means unhandled rejections go unnoticed.
+      These are silent bugs that only manifest at runtime.
+    severity: error
+    tags:
+      - async
+      - error-handling
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-misused-promises"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Await the async function or use a synchronous alternative.
+      example: |
+        // Before
+        if (validateAsync(user)) {
+            proceed();
+        }
+
+        // After
+        if (await validateAsync(user)) {
+            proceed();
+        }
+
+  - id: ts-await-thenable
+    name: Await only thenables
+    description: |
+      Flags `await` used on values that are not Promises or thenables.
+      Awaiting a non-Promise is a no-op that signals a misunderstanding.
+    rationale: |
+      `await 42` is legal but meaningless — it evaluates immediately to 42
+      and signals confusion about what's asynchronous. If a value is not
+      a Promise, don't await it. This often indicates the function was
+      refactored from async to sync but the await was not removed.
+    severity: error
+    tags:
+      - async
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/await-thenable"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Remove the await if the value is not a Promise.
+      example: |
+        // Before
+        const value = await computeSync();  // computeSync returns number
+
+        // After
+        const value = computeSync();
+
+  # ──────────────────────────────────────────────────────────────
+  # Error Handling
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-prefer-promise-reject-errors
+    name: Prefer Promise reject with Error
+    description: |
+      Flags `Promise.reject()` calls that pass a non-Error value. Rejections
+      should always be Error instances so stack traces are available.
+    rationale: |
+      `Promise.reject("something went wrong")` loses the call stack.
+      When the rejection is caught, there is no stack trace to debug.
+      Always reject with an Error so the origin of the failure is traceable.
+    severity: warning
+    tags:
+      - error-handling
+      - async
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-promise-reject-errors"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Pass an Error instance to Promise.reject().
+      example: |
+        // Before
+        return Promise.reject('not found');
+
+        // After
+        return Promise.reject(new Error('not found'));
+
+  - id: ts-only-throw-error
+    name: Only throw Error instances
+    description: |
+      Flags `throw` statements that throw non-Error values such as strings,
+      numbers, or plain objects. Only Error instances should be thrown.
+    rationale: |
+      Throwing a string or object loses the stack trace and breaks the
+      conventional `catch (e) { if (e instanceof Error) }` pattern. Error
+      subclasses carry a `.message`, `.stack`, and optionally `.cause` —
+      everything needed to diagnose the failure. Plain values carry none of this.
+    severity: error
+    tags:
+      - error-handling
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/only-throw-error"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Throw an Error instance, not a string or other primitive.
+      example: |
+        // Before
+        throw 'user not found';
+        throw { code: 404, message: 'not found' };
+
+        // After
+        throw new Error('user not found');
+        throw Object.assign(new Error('not found'), { code: 404 });
+
+  # ──────────────────────────────────────────────────────────────
+  # Code Quality
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-no-for-in-array
+    name: No for-in on arrays
+    description: |
+      Flags `for...in` loops used on arrays. `for...in` iterates over
+      string keys ("0", "1", ...) and enumerable prototype properties,
+      not array values.
+    rationale: |
+      `for...in` on arrays is a classic JavaScript footgun. It yields string
+      indices, not values, and may include prototype properties if the Array
+      prototype has been extended. Use `for...of` to iterate values, or
+      `arr.forEach()` / `arr.map()` for functional patterns.
+    severity: error
+    tags:
+      - correctness
+      - arrays
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-for-in-array"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use for...of to iterate array values.
+      example: |
+        // Before
+        for (const i in items) {
+            process(items[i]);
+        }
+
+        // After
+        for (const item of items) {
+            process(item);
+        }
+
+  - id: ts-no-unnecessary-condition
+    name: No unnecessary condition
+    description: |
+      Flags boolean conditions that TypeScript can prove are always truthy
+      or always falsy based on the types of the operands.
+    rationale: |
+      An always-true condition is either defensive code that was made
+      unnecessary by a type change, or a logic error where the developer
+      misunderstood the type. Either way, the code is misleading. Remove
+      dead conditions to keep logic honest.
+    severity: warning
+    tags:
+      - correctness
+      - dead-code
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-unnecessary-condition"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Remove the condition or adjust the types to reflect the actual constraints.
+      example: |
+        // Before
+        function greet(name: string): string {
+            if (name !== null) {  // name is string, never null
+                return `Hello, ${name}`;
+            }
+            return 'Hello';
+        }
+
+        // After
+        function greet(name: string): string {
+            return `Hello, ${name}`;
+        }
+
+  - id: ts-no-inferrable-types
+    name: No inferrable types
+    description: |
+      Flags explicit type annotations on variables or parameters where
+      TypeScript can already infer the type from the initializer.
+    rationale: |
+      Writing `const x: string = "hello"` annotates what TypeScript already
+      knows. The annotation adds visual noise without adding safety or
+      documentation value. Omit inferred types to keep code concise.
+      Reserve explicit annotations for non-obvious types and public API
+      boundaries.
+    severity: warning
+    tags:
+      - readability
+      - style
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/no-inferrable-types"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Remove the type annotation — TypeScript infers it from the initializer.
+      example: |
+        // Before
+        const name: string = "Alice";
+        const count: number = 0;
+        const active: boolean = true;
+
+        // After
+        const name = "Alice";
+        const count = 0;
+        const active = true;
+
+  - id: ts-prefer-includes
+    name: Prefer includes
+    description: |
+      Flags `.indexOf(x) !== -1` and similar patterns that test for
+      presence in a string or array. Use `.includes(x)` instead.
+    rationale: |
+      `.indexOf(x) !== -1` is a legacy pattern that returns a numeric index
+      rather than directly expressing "does this contain x". `.includes(x)`
+      is semantically clear, shorter, and explicitly returns a boolean.
+    severity: warning
+    tags:
+      - readability
+      - modern
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-includes"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Replace indexOf check with includes().
+      example: |
+        // Before
+        if (roles.indexOf('admin') !== -1) {
+            grantAccess();
+        }
+
+        // After
+        if (roles.includes('admin')) {
+            grantAccess();
+        }
+
+  - id: ts-prefer-string-starts-ends-with
+    name: Prefer startsWith and endsWith
+    description: |
+      Flags string comparisons using `.indexOf()`, `.slice()`, or regex
+      that could use `.startsWith()` or `.endsWith()` instead.
+    rationale: |
+      `str.indexOf('prefix') === 0` is a manual reimplementation of
+      `str.startsWith('prefix')`. The modern methods are more readable,
+      explicitly communicate intent, and avoid off-by-one opportunities.
+    severity: warning
+    tags:
+      - readability
+      - modern
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-string-starts-ends-with"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use startsWith() or endsWith() for prefix/suffix checks.
+      example: |
+        // Before
+        if (path.indexOf('/api') === 0) {
+            handleApi(path);
+        }
+
+        // After
+        if (path.startsWith('/api')) {
+            handleApi(path);
+        }
+
+  - id: ts-array-type
+    name: Consistent array type style
+    description: |
+      Enforces consistent use of `T[]` over `Array<T>` for array type
+      annotations throughout the codebase.
+    rationale: |
+      Mixing `T[]` and `Array<T>` in the same codebase is noisy. `T[]` is
+      the idiomatic TypeScript shorthand and reads more naturally in most
+      contexts. Pick one style and enforce it everywhere.
+    severity: warning
+    tags:
+      - style
+      - consistency
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/array-type"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use T[] syntax instead of Array<T>.
+      example: |
+        // Before
+        function getUsers(): Array<User> {
+            return [];
+        }
+
+        // After
+        function getUsers(): User[] {
+            return [];
+        }
+
+  # ──────────────────────────────────────────────────────────────
+  # Modern TypeScript Patterns
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-prefer-optional-chain
+    name: Prefer optional chain
+    description: |
+      Flags code using conditional checks (e.g., `obj && obj.prop`)
+      that could be simplified using optional chaining (`obj?.prop`).
+    rationale: |
+      Optional chaining is more concise, readable, and explicitly
+      communicates intent that a property may not exist. It also
+      short-circuits safely and is supported in all modern environments.
+    severity: warning
+    tags:
+      - readability
+      - modern
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-optional-chain"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use optional chaining operator (?.) for cleaner access.
+      example: |
+        // Before
+        if (user && user.profile && user.profile.email) {
+            console.log(user.profile.email);
+        }
+
+        // After
+        if (user?.profile?.email) {
+            console.log(user.profile.email);
+        }
+
+    references:
+      - https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-7.html#optional-chaining
+
+  - id: ts-prefer-nullish-coalescing
+    name: Prefer nullish coalescing
+    description: |
+      Flags the logical OR operator (||) used for default values
+      when nullish coalescing (??) would be more precise.
+    rationale: |
+      The || operator returns the right side for any falsy value
+      (0, "", false, null, undefined). Nullish coalescing (??)
+      only triggers for null/undefined, preserving intentional
+      falsy values like 0 or empty string. Use ?? when you only
+      want to default on null/undefined.
+    severity: warning
+    tags:
+      - readability
+      - null-safety
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-nullish-coalescing"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use nullish coalescing (??) instead of || for null/undefined defaults.
+      example: |
+        // Before
+        const count = userInput || 0;  // fails if userInput is 0
+
+        // After
+        const count = userInput ?? 0;  // only defaults if userInput is null/undefined
+
+    references:
+      - https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-7.html#nullish-coalescing
+
+  # ──────────────────────────────────────────────────────────────
+  # Module and API Design
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-consistent-type-imports
+    name: Consistent type imports
+    description: |
+      Flags imports of types that should use the type-only import
+      syntax (import type {...}) to clarify intent and enable
+      better tree-shaking.
+    rationale: |
+      Type-only imports make it explicit that something is a type,
+      not a runtime value. This helps TypeScript strip them during
+      compilation and improves tree-shaking. It also prevents
+      circular dependency issues and makes code intent clearer.
+    severity: warning
+    tags:
+      - module-design
+      - imports
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/consistent-type-imports"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use import type for types-only imports.
+      example: |
+        // Before
+        import { User, Admin } from './types';
+
+        // After (assuming User and Admin are types)
+        import type { User, Admin } from './types';
+
+    references:
+      - https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-8.html#type-only-imports-and-export
+
+  - id: ts-explicit-module-boundary-types
+    name: Explicit module boundary types
+    description: |
+      Flags exported functions and variables that lack explicit
+      return type annotations. This ensures the public API is
+      intentionally designed.
+    rationale: |
+      Explicit return types on exported symbols act as a contract
+      and prevent accidental API changes. They also improve IDE
+      hints for consumers and make refactoring safer.
+    severity: warning
+    tags:
+      - api-design
+      - documentation
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/explicit-module-boundary-types"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Add explicit return type annotation to exported function.
+      example: |
+        // Before
+        export function getUserEmail(id: string) {
+            return users[id]?.email;
+        }
+
+        // After
+        export function getUserEmail(id: string): string | undefined {
+            return users[id]?.email;
+        }
+
+    references:
+      - https://typescript-eslint.io/rules/explicit-module-boundary-types/
+
+  # ──────────────────────────────────────────────────────────────
+  # Advanced Patterns
+  # ──────────────────────────────────────────────────────────────
+
+  - id: ts-switch-exhaustiveness-check
+    name: Exhaustive switch on discriminated unions
+    description: |
+      Flags `switch` statements on discriminated union types where not all
+      variants are handled. Every branch must be covered or TypeScript
+      cannot guarantee safety.
+    rationale: |
+      Discriminated unions are TypeScript's primary tool for modeling
+      variants — shapes, states, event types. A switch that doesn't cover
+      all cases is a latent bug: add a new variant and existing switches
+      silently ignore it. With exhaustiveness checking, adding a variant
+      turns every unhandled switch into a compile error. This is the most
+      powerful way to make illegal states unrepresentable.
+    severity: error
+    tags:
+      - correctness
+      - discriminated-unions
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/switch-exhaustiveness-check"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Handle all variants of the discriminated union, or add a default that asserts never.
+      example: |
+        // Before
+        type Shape = { kind: 'circle'; radius: number } | { kind: 'rect'; width: number; height: number };
+
+        function area(shape: Shape): number {
+            switch (shape.kind) {
+                case 'circle': return Math.PI * shape.radius ** 2;
+                // 'rect' is unhandled — silent bug
+            }
+        }
+
+        // After
+        function area(shape: Shape): number {
+            switch (shape.kind) {
+                case 'circle': return Math.PI * shape.radius ** 2;
+                case 'rect':   return shape.width * shape.height;
+                default: {
+                    const _exhaustive: never = shape;
+                    throw new Error(`Unhandled shape: ${JSON.stringify(_exhaustive)}`);
+                }
+            }
+        }
+
+  - id: ts-prefer-readonly
+    name: Prefer readonly class properties
+    description: |
+      Flags class properties that are assigned only in the constructor and
+      never mutated elsewhere. These should be declared `readonly`.
+    rationale: |
+      A property that is set once at construction and never changed is
+      conceptually immutable. Marking it `readonly` communicates this intent,
+      prevents accidental mutation in subclasses or methods, and signals
+      to readers that this value is stable for the lifetime of the instance.
+    severity: warning
+    tags:
+      - immutability
+      - class-design
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/prefer-readonly"
+        plugin: "@typescript-eslint/eslint-plugin"
+        type_aware: true
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Add the readonly modifier to the property declaration.
+      example: |
+        // Before
+        class UserService {
+            private db: Database;
+            constructor(db: Database) {
+                this.db = db;
+            }
+        }
+
+        // After
+        class UserService {
+            constructor(private readonly db: Database) {}
+        }
+
+  - id: ts-consistent-indexed-object-style
+    name: Consistent indexed object style
+    description: |
+      Enforces `Record<K, V>` over inline index signatures
+      `{ [key: K]: V }` for objects with dynamic keys.
+    rationale: |
+      `Record<string, User>` is more concise and directly names the
+      intended semantic — a mapping from keys to values. Inline index
+      signatures are more verbose and easy to misread. Consistency here
+      also makes it easier to grep for all dynamic-key usages in the codebase.
+    severity: warning
+    tags:
+      - style
+      - consistency
+
+    detector:
+      capability: eslint
+      config:
+        rule: "@typescript-eslint/consistent-indexed-object-style"
+        plugin: "@typescript-eslint/eslint-plugin"
+
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+
+    fix:
+      message: Use Record<K, V> instead of an inline index signature.
+      example: |
+        // Before
+        type UserMap = { [id: string]: User };
+        function cache(): { [key: string]: Response } { }
+
+        // After
+        type UserMap = Record<string, User>;
+        function cache(): Record<string, Response> { }

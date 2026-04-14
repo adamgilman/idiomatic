@@ -1,0 +1,12 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: [this is not valid yaml because of the unquoted bracket
+  name: "broken
+  version: ???
+rules
+  - id missing-colon
+    severity error
+    detector
+      backend: [[[

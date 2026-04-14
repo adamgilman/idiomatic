@@ -1,0 +1,671 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-concurrency
+  name: Go Concurrency
+  version: 0.1.0
+  description: >
+    Principal-level concurrency rules for Go services. Catches goroutine
+    leaks, channel misuse, race conditions, and synchronization
+    anti-patterns that cause deadlocks, data corruption, and memory
+    exhaustion in production.
+  descriptions:
+    business: >
+      Go makes it easy to run thousands of tasks in parallel, but small
+      mistakes in how those tasks coordinate cause the hardest bugs to find —
+      services that slowly leak memory until they crash, data that gets
+      corrupted under load, or programs that freeze completely. This pack
+      catches those mistakes before they reach production, where they only
+      show up under real traffic patterns you can't reproduce in testing.
+    developer: >
+      Go's concurrency primitives are powerful but unforgiving — a forgotten
+      close(ch) blocks a consumer forever, a Lock without defer Unlock
+      deadlocks on any early return, and a map write inside a goroutine
+      panics the process. These rules enforce the patterns from the Go
+      blog's concurrency articles that the race detector can't catch
+      statically.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-concurrency.yaml
+  tags:
+    language: go
+    category: resilience
+    architecture: [services, workers, pipelines]
+
+rules:
+  # ── Channel lifecycle ──────────────────────────────────────────
+
+  - id: go-conc-channel-never-closed
+    name: Channel created but never closed
+    description: >
+      Flags channels created with make(chan) that are never closed within
+      the same function scope. Consumers using range will block forever.
+    descriptions:
+      business: >
+        This code creates a communication channel but never signals that
+        it's done. Think of it like opening a phone line and never hanging
+        up — the person on the other end waits forever. Over time, these
+        stuck tasks pile up and consume memory until the service crashes.
+      developer: >
+        make(chan) without a corresponding close() means any goroutine
+        doing `for v := range ch` blocks forever after the sender finishes.
+        This is a goroutine leak. Either close the channel when done
+        sending, or use context cancellation as the shutdown signal.
+    rationale: >
+      A channel that is never closed creates a goroutine leak. Any
+      consumer that ranges over the channel will block indefinitely after
+      the producer finishes sending. The goroutine stays in memory, holding
+      its stack and any references it captured. In a long-running service,
+      this accumulates until memory exhaustion triggers an OOM kill. Always
+      close channels from the sender side when no more values will be sent.
+    severity: warning
+    tags: [concurrency, channel, goroutine-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $CH := make(chan $TYPE, ...)
+          - pattern-not-inside: |
+              $CH := make(chan $TYPE, ...)
+              ...
+              close($CH)
+          - pattern-not-inside: |
+              $CH := make(chan $TYPE, ...)
+              ...
+              defer close($CH)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Close the channel when done sending, typically with defer close(ch).
+      example: |
+        // Before — consumer blocks forever after sender finishes
+        ch := make(chan Result, 10)
+        go func() {
+            for _, item := range items {
+                ch <- process(item)
+            }
+        }()
+
+        // After — consumer exits cleanly
+        ch := make(chan Result, 10)
+        go func() {
+            defer close(ch)
+            for _, item := range items {
+                ch <- process(item)
+            }
+        }()
+    references:
+      - https://go.dev/blog/pipelines
+      - https://go.dev/tour/concurrency/4
+
+  - id: go-conc-send-on-closed-channel
+    name: Send on closed channel
+    description: >
+      Flags code that sends on a channel after calling close() on it.
+      This causes a runtime panic.
+    descriptions:
+      business: >
+        This code tries to use a communication channel after it's been
+        shut down, which crashes the entire service immediately. It's
+        like trying to make a phone call after the line has been
+        disconnected — except instead of a busy signal, your whole
+        application goes down.
+      developer: >
+        Sending on a closed channel panics in Go — there's no recovery
+        from this at the channel level. If you see close(ch) followed by
+        ch <- val, it's a guaranteed crash. Restructure so the close
+        happens only after all senders are done.
+    rationale: >
+      Go's runtime panics on any send to a closed channel. This is not
+      recoverable at the channel level — the goroutine crashes. In
+      production, this manifests as intermittent crashes under load when
+      the close and send race. The fix is always structural: the entity
+      that closes the channel must be the last sender, or use a
+      sync.WaitGroup to ensure all senders finish before closing.
+    severity: error
+    tags: [concurrency, channel, panic]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          close($CH)
+          ...
+          $CH <- $VAL
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Ensure close() is called only after all sends are complete.
+      example: |
+        // Before — panic: send on closed channel
+        close(ch)
+        ch <- result
+
+        // After — WaitGroup ensures sends complete before close
+        var wg sync.WaitGroup
+        for _, item := range items {
+            wg.Add(1)
+            go func(it Item) {
+                defer wg.Done()
+                ch <- process(it)
+            }(item)
+        }
+        wg.Wait()
+        close(ch)
+    references:
+      - https://go.dev/ref/spec#Close
+      - https://go.dev/blog/pipelines
+
+  # ── Mutex discipline ───────────────────────────────────────────
+
+  - id: go-conc-mutex-lock-no-unlock
+    name: Mutex Lock without corresponding Unlock
+    description: >
+      Flags Mutex.Lock() calls that are not followed by a defer
+      Mutex.Unlock() or explicit Unlock() in the same function.
+    descriptions:
+      business: >
+        This code acquires an exclusive lock on shared data but might
+        never release it. Think of it like locking a bathroom door and
+        losing the key — everyone else is stuck waiting forever. This
+        causes your service to freeze completely under load.
+      developer: >
+        Lock() without defer Unlock() means any early return, panic, or
+        error path leaves the mutex held forever. Every subsequent Lock()
+        call blocks, and your service deadlocks. Always use
+        defer mu.Unlock() on the line immediately after Lock().
+    rationale: >
+      A mutex that is locked but never unlocked causes a deadlock. Every
+      subsequent goroutine that tries to acquire the lock blocks forever.
+      The most common cause is an error path that returns before Unlock()
+      is reached. Using defer mu.Unlock() immediately after Lock()
+      guarantees the lock is released regardless of how the function exits
+      — including panics.
+    severity: error
+    tags: [concurrency, mutex, deadlock]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $MU.Lock()
+          - pattern-not-inside: |
+              $MU.Lock()
+              ...
+              defer $MU.Unlock()
+          - pattern-not-inside: |
+              $MU.Lock()
+              ...
+              $MU.Unlock()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer mu.Unlock() immediately after mu.Lock().
+      example: |
+        // Before — deadlock on any early return
+        mu.Lock()
+        if err != nil {
+            return err  // mutex never unlocked!
+        }
+        mu.Unlock()
+
+        // After — always unlocked
+        mu.Lock()
+        defer mu.Unlock()
+        if err != nil {
+            return err  // deferred unlock runs
+        }
+    references:
+      - https://pkg.go.dev/sync#Mutex
+      - https://go.dev/blog/defer-panic-and-recover
+
+  # ── Context lifecycle ──────────────────────────────────────────
+
+  - id: go-conc-context-cancel-not-called
+    name: Context cancel function never called
+    description: >
+      Flags context.WithCancel, WithTimeout, or WithDeadline where the
+      returned cancel function is never called. Leaks context resources.
+    descriptions:
+      business: >
+        This code creates a cancellable operation but never wires up the
+        cancellation. It's like starting a timer that can never be stopped.
+        Over time, these leaked resources accumulate and degrade service
+        performance until a restart is needed.
+      developer: >
+        WithCancel/WithTimeout/WithDeadline return a cancel func that MUST
+        be called — even if the context times out on its own. Not calling
+        cancel leaks the context's internal timer goroutine and prevents
+        the parent context from releasing resources. Always defer cancel()
+        on the next line.
+    rationale: >
+      The Go documentation explicitly states: "Failing to call the
+      CancelFunc leaks the child and its children until the parent is
+      canceled or the timer fires." In a long-running service, this
+      accumulates leaked goroutines and timers. The fix is always the
+      same pattern: ctx, cancel := context.WithX(...) followed
+      immediately by defer cancel().
+    severity: warning
+    tags: [concurrency, context, resource-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $CTX, $CANCEL := context.WithCancel(...)
+              - pattern: $CTX, $CANCEL := context.WithTimeout(...)
+              - pattern: $CTX, $CANCEL := context.WithDeadline(...)
+          - pattern-not-inside: |
+              $CTX, $CANCEL := $CREATE(...)
+              ...
+              defer $CANCEL()
+          - pattern-not-inside: |
+              $CTX, $CANCEL := $CREATE(...)
+              ...
+              $CANCEL()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer cancel() immediately after creating the context.
+      example: |
+        // Before — context resources leaked
+        ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+        resp, err := client.Do(req.WithContext(ctx))
+
+        // After
+        ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+        defer cancel()
+        resp, err := client.Do(req.WithContext(ctx))
+    references:
+      - https://pkg.go.dev/context#WithCancel
+      - https://go.dev/blog/context
+
+  # ── Map safety ─────────────────────────────────────────────────
+
+  - id: go-conc-shared-map-write
+    name: Map write inside goroutine
+    description: >
+      Flags map write operations inside goroutine bodies. Concurrent map
+      writes panic in Go.
+    descriptions:
+      business: >
+        This code modifies shared data from multiple parallel tasks
+        simultaneously, which crashes the service. It's like two people
+        trying to edit the same spreadsheet cell at the exact same time —
+        except instead of a merge conflict, your entire application
+        crashes with no warning.
+      developer: >
+        Go's map type is not safe for concurrent writes. A map write
+        inside a goroutine that races with any other map access (read or
+        write) causes a fatal panic: "concurrent map writes". Use
+        sync.Map, or protect with a mutex, or redesign to avoid shared
+        mutable state.
+    rationale: >
+      Go's runtime detects concurrent map access and intentionally panics
+      with "concurrent map read and map write" or "concurrent map writes".
+      This is not a data race that merely corrupts data — it is a hard
+      crash. The runtime added this check in Go 1.6 because silent map
+      corruption was causing worse bugs. In production, this manifests as
+      intermittent panics under load that are impossible to reproduce in
+      single-threaded tests.
+    severity: error
+    tags: [concurrency, map, panic, race-condition]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          go func(...) {
+            ...
+            $MAP[$KEY] = $VAL
+            ...
+          }(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Protect map writes with a sync.Mutex, use sync.Map, or collect results via channels.
+      example: |
+        // Before — concurrent map write panic
+        results := make(map[string]int)
+        for _, item := range items {
+            go func(it Item) {
+                results[it.ID] = process(it)
+            }(item)
+        }
+
+        // After — channel-based collection
+        type result struct { id string; val int }
+        ch := make(chan result, len(items))
+        for _, item := range items {
+            go func(it Item) {
+                ch <- result{it.ID, process(it)}
+            }(item)
+        }
+        results := make(map[string]int)
+        for range items {
+            r := <-ch
+            results[r.id] = r.val
+        }
+    references:
+      - https://go.dev/doc/faq#atomic_maps
+      - https://pkg.go.dev/sync#Map
+
+  # ── Synchronization anti-patterns ──────────────────────────────
+
+  - id: go-conc-time-sleep-sync
+    name: time.Sleep used for goroutine synchronization
+    description: >
+      Flags time.Sleep used as a synchronization mechanism between
+      goroutines instead of proper sync primitives.
+    descriptions:
+      business: >
+        This code uses arbitrary wait times to coordinate parallel tasks,
+        which is like telling two teams to "just wait 5 minutes" instead
+        of actually communicating when they're done. It's fragile — if
+        one task takes longer than expected, the coordination breaks and
+        results are wrong or missing. It also wastes time when tasks
+        finish early.
+      developer: >
+        time.Sleep for synchronization is a code smell. It's non-deterministic,
+        wastes time when goroutines finish early, and breaks when load
+        increases processing time beyond the sleep duration. Use
+        sync.WaitGroup, errgroup, channels, or context cancellation for
+        proper coordination.
+    rationale: >
+      time.Sleep-based synchronization is a race condition waiting to
+      happen. It works in tests with low load and breaks in production
+      when goroutines take longer than the sleep duration. It also
+      wastes time — if the goroutine finishes in 1ms, you still wait
+      the full sleep duration. Use sync.WaitGroup for fan-out/fan-in,
+      channels for signaling, or errgroup for error-propagating
+      concurrent work.
+    severity: warning
+    tags: [concurrency, synchronization, fragile]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: time.Sleep(...)
+          - pattern-inside: |
+              go func(...) { ... }(...)
+              ...
+              time.Sleep(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Replace time.Sleep with sync.WaitGroup, channels, or errgroup for goroutine coordination.
+      example: |
+        // Before — fragile, wastes time, breaks under load
+        go func() { result = compute() }()
+        time.Sleep(100 * time.Millisecond)
+
+        // After — deterministic, instant
+        var wg sync.WaitGroup
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            result = compute()
+        }()
+        wg.Wait()
+    references:
+      - https://pkg.go.dev/sync#WaitGroup
+      - https://go.dev/blog/pipelines
+
+  - id: go-conc-select-single-case
+    name: Select with single case and no default
+    description: >
+      Flags select statements with only one case and no default clause.
+      This is equivalent to a direct channel operation with extra syntax.
+    descriptions:
+      business: >
+        This is a code clarity issue — the code uses an unnecessary wrapper
+        around a simple operation, making it harder for the team to read
+        and maintain. It doesn't cause bugs but adds confusion during
+        code review and debugging.
+      developer: >
+        A select with one case and no default is identical to a direct
+        channel receive or send. The select keyword adds nothing — it's
+        just noise. Either add a default/timeout case to make the select
+        meaningful, or remove the select and use the channel op directly.
+    rationale: >
+      A single-case select with no default is syntactic noise. It
+      compiles to the same code as a direct channel operation but obscures
+      intent. If the programmer intended non-blocking behavior, a default
+      case is missing. If they intended timeout behavior, a time.After
+      case is missing. Either way, the select is incomplete or unnecessary.
+    severity: info
+    tags: [concurrency, channel, code-clarity]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              select {
+              case $X := <-$CH:
+                ...
+              }
+          - pattern-not-inside: |
+              select {
+              case ...:
+                ...
+              case ...:
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Remove the select and use the channel operation directly, or add a default/timeout case.
+      example: |
+        // Before — unnecessary select
+        select {
+        case msg := <-ch:
+            process(msg)
+        }
+
+        // After — direct channel receive
+        msg := <-ch
+        process(msg)
+
+        // Or — if non-blocking was intended, add default
+        select {
+        case msg := <-ch:
+            process(msg)
+        default:
+            // no message available
+        }
+    references:
+      - https://go.dev/tour/concurrency/5
+      - https://go.dev/ref/spec#Select_statements
+
+  # ── Goroutine lifecycle ────────────────────────────────────────
+
+  - id: go-conc-goroutine-in-init
+    name: Goroutine launched in init()
+    description: >
+      Flags goroutines started inside init() functions. Init runs before
+      main and has no lifecycle management.
+    descriptions:
+      business: >
+        This code starts background work during application startup before
+        the application is ready to manage it. Think of it like hiring
+        contractors before you have a project manager — the work happens
+        with nobody overseeing it, and there's no way to stop it cleanly
+        when needed.
+      developer: >
+        init() runs before main() and there's no context, no shutdown
+        signal, and no error propagation. A goroutine launched in init()
+        has no lifecycle management — you can't cancel it, can't wait for
+        it, and can't catch its errors. Move background work to main()
+        or a startup function with proper context.
+    rationale: >
+      Goroutines in init() run before main() and lack lifecycle management.
+      There is no context to cancel them, no WaitGroup to wait on them,
+      and no way to propagate errors. If the goroutine panics, the
+      process crashes before it's fully initialized. If it needs graceful
+      shutdown, there's no signal to tell it to stop. Move goroutine
+      creation to main() or a constructor that accepts a context.
+    severity: warning
+    tags: [concurrency, lifecycle, init]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          func init() {
+            ...
+            go $FUNC(...)
+            ...
+          }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move goroutine creation from init() to main() or a startup function with context and shutdown handling.
+      example: |
+        // Before — unmanaged background goroutine
+        func init() {
+            go pollMetrics()
+        }
+
+        // After — managed lifecycle
+        func main() {
+            ctx, cancel := signal.NotifyContext(context.Background(),
+                os.Interrupt, syscall.SIGTERM)
+            defer cancel()
+            go pollMetrics(ctx)
+            <-ctx.Done()
+        }
+    references:
+      - https://go.dev/doc/effective_go#init
+      - https://go.dev/blog/context
+
+  - id: go-conc-once-do-return
+    name: sync.Once Do with captured return value
+    description: >
+      Flags sync.Once.Do() where the closure captures a return value
+      that callers depend on. Only the first caller's execution sets
+      the value — subsequent callers get the first call's result even
+      if their inputs differ.
+    descriptions:
+      business: >
+        This code runs an initialization step that's designed to execute
+        only once, but other parts of the code depend on different results
+        from each call. It's like a vending machine that only accepts
+        the first person's selection — everyone else gets the same item
+        regardless of what they pressed.
+      developer: >
+        sync.Once.Do guarantees the function runs exactly once. If you
+        capture a return value in a closure, only the first caller's
+        result is stored. Subsequent callers get that same result, which
+        may be stale or wrong for their context. Use Once for pure
+        initialization only, not for caching parameterized results.
+    rationale: >
+      sync.Once is designed for one-time initialization. If you use it
+      to cache a result that depends on input parameters, the first
+      caller's parameters determine the result for all future callers.
+      This is a subtle bug because it works correctly for the first
+      request and silently returns wrong results for every subsequent
+      request with different parameters.
+    severity: warning
+    tags: [concurrency, once, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          $ONCE.Do(func() {
+            ...
+            $RESULT = $FUNC(...)
+            ...
+          })
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use sync.Once only for initialization with no parameters. For parameterized caching use sync.Map or singleflight.
+      example: |
+        // Before — first caller's config used for all
+        var cfg Config
+        var once sync.Once
+        func GetConfig(env string) Config {
+            once.Do(func() {
+                cfg = loadConfig(env)  // only first env is used!
+            })
+            return cfg
+        }
+
+        // After — singleflight for parameterized dedup
+        var group singleflight.Group
+        func GetConfig(env string) (Config, error) {
+            v, err, _ := group.Do(env, func() (interface{}, error) {
+                return loadConfig(env)
+            })
+            return v.(Config), err
+        }
+    references:
+      - https://pkg.go.dev/sync#Once
+      - https://pkg.go.dev/golang.org/x/sync/singleflight
+
+  - id: go-conc-waitgroup-add-inside-goroutine
+    name: WaitGroup.Add called inside goroutine
+    description: >
+      Flags sync.WaitGroup.Add() called inside a goroutine body instead
+      of before launching the goroutine. Race condition with Wait().
+    descriptions:
+      business: >
+        This code has a timing bug where the program might think all
+        parallel tasks are done before they've even started. It's like
+        a roll call where people can join the list after the count has
+        already been taken — some tasks silently get skipped.
+      developer: >
+        wg.Add(1) inside the goroutine races with wg.Wait() in the
+        parent. If Wait() runs before Add(), it returns immediately and
+        the parent proceeds while goroutines are still running. Always
+        call wg.Add(1) before the go statement.
+    rationale: >
+      WaitGroup.Add() must be called before the goroutine starts, not
+      inside it. If the parent calls Wait() before the goroutine's Add()
+      executes, Wait() sees a zero counter and returns immediately. The
+      parent then proceeds (potentially closing channels, returning
+      results, or shutting down) while goroutines are still running. This
+      is a textbook race condition that the race detector may not catch
+      because it depends on goroutine scheduling timing.
+    severity: error
+    tags: [concurrency, waitgroup, race-condition]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          go func(...) {
+            ...
+            $WG.Add(...)
+            ...
+          }(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move wg.Add(1) before the go statement.
+      example: |
+        // Before — race between Add and Wait
+        go func() {
+            wg.Add(1)
+            defer wg.Done()
+            process(item)
+        }()
+        wg.Wait()
+
+        // After — Add before goroutine launch
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            process(item)
+        }()
+        wg.Wait()
+    references:
+      - https://pkg.go.dev/sync#WaitGroup.Add
+      - https://go.dev/doc/articles/race_detector

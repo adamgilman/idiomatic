@@ -1,0 +1,573 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: python-starter
+  name: Python Starter
+  version: 0.1.0
+  description: >
+    Foundational Python rules covering error handling, type safety,
+    async patterns, and common pitfalls. Everything a Python project
+    needs to stay idiomatic from day one, without requiring team
+    discussion to adopt.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/python-starter.yaml
+
+rules:
+  # ── Error handling ─────────────────────────────────────────────
+
+  - id: py-bare-except
+    name: Bare except clause catches everything
+    description: >
+      Flags except clauses with no exception type. A bare except catches
+      SystemExit, KeyboardInterrupt, and GeneratorExit in addition to
+      regular exceptions, making it impossible to interrupt the program.
+    descriptions:
+      business: >
+        This code catches every possible error including the ones that mean
+        "stop the program now." If a user presses Ctrl+C or the system tries
+        to shut down gracefully, this code swallows that signal and keeps
+        running. This leads to processes that cannot be stopped cleanly,
+        zombie services that ignore shutdown signals, and incidents where
+        deployments hang because old processes refuse to die.
+      developer: >
+        A bare except clause catches BaseException, which includes
+        SystemExit (raised by sys.exit()), KeyboardInterrupt (Ctrl+C),
+        and GeneratorExit. These should almost never be caught. Use
+        except Exception to catch only regular exceptions, or catch
+        specific exception types for precise error handling.
+    rationale: >
+      Bare except catches BaseException — the root of the entire exception
+      hierarchy. This includes SystemExit (sys.exit()), KeyboardInterrupt
+      (Ctrl+C), and GeneratorExit, none of which should be silently caught
+      in normal code. The result is programs that cannot be interrupted,
+      cannot be stopped by process managers, and mask the real error
+      behind a generic handler. PEP 8 explicitly recommends against bare
+      except clauses.
+    severity: error
+    tags: [error-handling, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: |
+          try:
+              ...
+          except:
+              ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use except Exception or catch a specific exception type.
+      example: |
+        # Before — catches SystemExit and KeyboardInterrupt
+        try:
+            process_data()
+        except:
+            log.error("something went wrong")
+
+        # After — catches only regular exceptions
+        try:
+            process_data()
+        except Exception:
+            log.error("something went wrong")
+    references:
+      - https://docs.python.org/3/tutorial/errors.html
+      - https://peps.python.org/pep-0008/#programming-recommendations
+
+  - id: py-mutable-default-arg
+    name: Mutable default argument in function definition
+    description: >
+      Flags function definitions that use a mutable object (list or dict)
+      as a default argument value. The default is shared across all calls,
+      causing unexpected mutation between invocations.
+    descriptions:
+      business: >
+        This code has a bug that only appears after the function is called
+        more than once. The first call works fine, but subsequent calls
+        see leftover data from previous calls. This causes data leaking
+        between users, corrupted results, and intermittent bugs that are
+        extremely difficult to reproduce.
+      developer: >
+        Python evaluates default arguments once at function definition
+        time, not at each call. A mutable default like [] or {} is
+        shared across all invocations. Appending to a default list in
+        one call makes that data visible in the next call. Use None as
+        the default and create the mutable object inside the function.
+    rationale: >
+      Default argument values are evaluated once when the function is
+      defined, then reused for every call. For immutable types (int,
+      str, tuple) this is harmless. For mutable types (list, dict, set)
+      it means every call shares the same object. This is Python's most
+      infamous gotcha — it causes data to leak between calls, between
+      users, between requests. The fix is always the same: use None as
+      the default and create the mutable object inside the function body.
+    severity: error
+    tags: [correctness, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: |
+              def $FUNC(..., $ARG=[], ...):
+                  ...
+          - pattern: |
+              def $FUNC(..., $ARG={}, ...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use None as the default value and create the mutable object inside the function.
+      example: |
+        # Before — shared mutable default
+        def add_item(item, items=[]):
+            items.append(item)
+            return items
+
+        # After — safe default
+        def add_item(item, items=None):
+            if items is None:
+                items = []
+            items.append(item)
+            return items
+    references:
+      - https://docs.python.org/3/reference/compound_stmts.html#function-definitions
+      - https://docs.python-guide.org/writing/gotchas/#mutable-default-arguments
+
+  - id: py-broad-exception-raise
+    name: Raising generic Exception instead of specific type
+    description: >
+      Flags raise Exception(...) statements. Raising a generic Exception
+      makes it impossible for callers to distinguish between different
+      error conditions without parsing the message string.
+    descriptions:
+      business: >
+        When code raises a generic error, every piece of code that calls
+        it has to guess what went wrong by reading the error message text.
+        This makes error handling fragile — a small change to the error
+        message breaks all the code that depends on it. Specific error
+        types let calling code handle each situation differently.
+      developer: >
+        raise Exception("...") forces callers to catch Exception (too
+        broad) or parse the message string (brittle). Define specific
+        exception classes or use built-in ones like ValueError,
+        TypeError, RuntimeError. This lets callers write precise except
+        clauses for different error conditions.
+    rationale: >
+      Generic exceptions force callers into a lose-lose choice: catch
+      Exception (too broad, masks other errors) or parse the message
+      string (brittle, breaks when messages change). Specific exception
+      types enable precise error handling — a caller can catch
+      ValidationError separately from ConnectionError and handle each
+      appropriately. Built-in types cover most cases: ValueError for
+      invalid arguments, TypeError for wrong types, RuntimeError for
+      state violations, PermissionError for access issues.
+    severity: warning
+    tags: [error-handling, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: raise Exception(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Raise a specific exception type (ValueError, TypeError, RuntimeError, or a custom class).
+      example: |
+        # Before — generic exception
+        def validate_age(age):
+            if age < 0:
+                raise Exception("age must be non-negative")
+
+        # After — specific exception
+        def validate_age(age):
+            if age < 0:
+                raise ValueError("age must be non-negative")
+    references:
+      - https://docs.python.org/3/library/exceptions.html#exception-hierarchy
+      - https://peps.python.org/pep-0008/#programming-recommendations
+
+  # ── Safety pitfalls ────────────────────────────────────────────
+
+  - id: py-assert-in-production
+    name: Assert used for runtime validation
+    description: >
+      Flags assert statements in non-test code. Python strips assert
+      statements when run with the -O flag, making them unsuitable
+      for input validation or runtime checks.
+    descriptions:
+      business: >
+        Assert statements are debugging tools that Python can silently
+        remove in production. Code that uses assert to validate user
+        input or check important conditions will accept any input and
+        skip all checks when Python runs in optimized mode. This creates
+        a false sense of security that vanishes in production.
+      developer: >
+        Python's -O and -OO flags strip all assert statements from
+        bytecode. If you use assert to validate function arguments,
+        check API input, or enforce business rules, those checks
+        disappear in optimized mode. Use if/raise for any validation
+        that must run in production. Reserve assert for development-time
+        invariant checks and test assertions.
+    rationale: >
+      assert is a debugging aid, not a validation tool. The -O flag
+      (commonly used in production Docker images and deployment scripts)
+      strips all assert statements. Code like assert user_id is not None
+      becomes a no-op — the check vanishes, and the function proceeds
+      with None. This has caused real security vulnerabilities where
+      authorization checks were implemented with assert. Use if/raise
+      for any check that must execute in production.
+    severity: warning
+    tags: [safety, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: assert ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**", "**/test_*.py", "**/*_test.py", "**/tests/**", "**/conftest.py"]
+    fix:
+      message: Replace assert with if/raise for runtime validation. Keep assert for tests only.
+      example: |
+        # Before — stripped in production with -O
+        def get_user(user_id):
+            assert user_id is not None
+            return db.query(User).get(user_id)
+
+        # After — always executes
+        def get_user(user_id):
+            if user_id is None:
+                raise ValueError("user_id must not be None")
+            return db.query(User).get(user_id)
+    references:
+      - https://docs.python.org/3/reference/simple_stmts.html#the-assert-statement
+      - https://docs.python.org/3/using/cmdline.html#cmdoption-O
+
+  - id: py-open-without-with
+    name: File opened without context manager
+    description: >
+      Flags file open() calls whose result is assigned to a variable
+      outside a with statement. Without a context manager, the file
+      handle may not be closed if an exception occurs.
+    descriptions:
+      business: >
+        This code opens a file but doesn't guarantee it will be closed
+        if something goes wrong. Under load, leaked file handles
+        accumulate until the operating system refuses to open any more
+        files, causing crashes across the entire service.
+      developer: >
+        Assigning open() to a variable without a with block means the
+        file handle is only closed if you explicitly call .close() and
+        no exception interrupts the flow. A with statement guarantees
+        the file is closed even if an exception is raised, preventing
+        file descriptor leaks.
+    rationale: >
+      File descriptors are a finite OS resource. Without a context
+      manager, an exception between open() and close() leaks the
+      descriptor. Under sustained load, leaked descriptors accumulate
+      until the process hits the OS limit (typically 1024), causing
+      "Too many open files" errors that crash the entire service. The
+      with statement guarantees cleanup via __exit__ regardless of
+      exceptions.
+    severity: warning
+    tags: [resource-management, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: $VAR = open(...)
+          - pattern-not-inside: |
+              with open(...) as $VAR:
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use a with statement to ensure the file is closed on exit.
+      example: |
+        # Before — file handle leaked on exception
+        f = open("data.csv")
+        data = f.read()
+        f.close()
+
+        # After — guaranteed cleanup
+        with open("data.csv") as f:
+            data = f.read()
+    references:
+      - https://docs.python.org/3/reference/compound_stmts.html#the-with-statement
+      - https://peps.python.org/pep-0343/
+
+  # ── Security ───────────────────────────────────────────────────
+
+  - id: py-string-format-sql
+    name: SQL query built with string formatting
+    description: >
+      Flags cursor.execute() calls where the query is built using
+      f-strings or .format(). This is a SQL injection vulnerability.
+    descriptions:
+      business: >
+        This code builds database queries by pasting user input directly
+        into the SQL string. An attacker can type specially crafted input
+        that modifies the query — reading data they shouldn't see,
+        deleting tables, or bypassing authentication entirely. SQL
+        injection is the #1 web application vulnerability (OWASP A03).
+      developer: >
+        String formatting (f-strings, .format(), % formatting) in SQL
+        queries creates injection vectors. User input like
+        "'; DROP TABLE users; --" becomes part of the SQL command. Use
+        parameterized queries instead — the database driver handles
+        escaping and type conversion safely.
+    rationale: >
+      SQL injection via string formatting is the most common and most
+      dangerous web vulnerability. When user input is interpolated into
+      SQL via f-strings or .format(), an attacker controls the query
+      structure. Parameterized queries (cursor.execute("SELECT * FROM
+      users WHERE id = %s", (user_id,))) separate the query structure
+      from the data, making injection impossible regardless of input.
+    severity: error
+    tags: [security, sql-injection]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: $CURSOR.execute(f"...", ...)
+          - pattern: $CURSOR.execute("...".format(...), ...)
+          - pattern: $CURSOR.execute("..." % ..., ...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use parameterized queries with placeholders instead of string formatting.
+      example: |
+        # Before — SQL injection vulnerability
+        cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")
+
+        # After — parameterized query
+        cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+    references:
+      - https://docs.python.org/3/library/sqlite3.html#sqlite3-placeholders
+      - https://owasp.org/www-community/attacks/SQL_Injection
+      - https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html
+
+  # ── Code quality ───────────────────────────────────────────────
+
+  - id: py-no-return-in-init
+    name: Non-None return value in __init__
+    description: >
+      Flags return statements with a value inside __init__ methods.
+      __init__ must return None — returning a value raises TypeError
+      at runtime.
+    descriptions:
+      business: >
+        This code will crash at runtime when the class is instantiated.
+        Python requires __init__ to return None. Any other return value
+        causes an immediate TypeError, breaking the feature wherever
+        this class is used.
+      developer: >
+        __init__ is an initializer, not a constructor. It receives the
+        already-created instance (self) and sets it up. Returning a
+        value from __init__ raises TypeError: __init__() should return
+        None. If you need a factory pattern, use a classmethod or
+        __new__ instead.
+    rationale: >
+      Python calls __init__ after __new__ creates the instance. The
+      return value of __init__ is always ignored — if it returns
+      anything other than None, Python raises TypeError. This is a
+      common mistake from developers coming from languages where the
+      constructor returns the new object. Use a @classmethod factory
+      if you need to return different types or apply transformations.
+    severity: error
+    tags: [correctness, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: return $VALUE
+          - pattern-inside: |
+              def __init__(self, ...):
+                  ...
+          - pattern-not: return None
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Remove the return value from __init__. Use a @classmethod factory if needed.
+      example: |
+        # Before — raises TypeError at runtime
+        class User:
+            def __init__(self, name):
+                self.name = name
+                return self
+
+        # After — correct __init__
+        class User:
+            def __init__(self, name):
+                self.name = name
+    references:
+      - https://docs.python.org/3/reference/datamodel.html#object.__init__
+
+  - id: py-shadowing-builtin
+    name: Variable name shadows a Python builtin
+    description: >
+      Flags assignments to common builtin names like id, type, list,
+      dict, input, map, filter, and set. Shadowing builtins makes the
+      original function inaccessible in that scope.
+    descriptions:
+      business: >
+        Using Python's reserved names as variable names breaks built-in
+        functionality throughout the function. Code that worked before
+        the assignment suddenly fails because a common function like
+        list() or type() now refers to a local variable instead. These
+        bugs are confusing and time-consuming to diagnose.
+      developer: >
+        Assigning to a builtin name like id, type, list, dict, set,
+        input, map, or filter shadows the builtin in that scope. After
+        id = 42, calling id(obj) raises TypeError because id is now an
+        int. Choose descriptive names instead: user_id, item_list,
+        config_dict.
+    rationale: >
+      Python builtins are not reserved words — you can assign to them,
+      which shadows the original function in that scope. This causes
+      confusing errors: after list = [1, 2, 3], calling list(range(5))
+      raises TypeError because list is now a list object, not the
+      builtin constructor. The most commonly shadowed names are id,
+      type, list, dict, set, input, map, filter, and format. Use
+      descriptive names instead.
+    severity: warning
+    tags: [naming, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: id = ...
+          - pattern: type = ...
+          - pattern: list = ...
+          - pattern: dict = ...
+          - pattern: set = ...
+          - pattern: input = ...
+          - pattern: map = ...
+          - pattern: filter = ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Choose a descriptive name instead of shadowing a builtin (e.g., user_id, item_list).
+      example: |
+        # Before — shadows builtin id() and list()
+        id = get_user_id()
+        list = fetch_items()
+
+        # After — descriptive names
+        user_id = get_user_id()
+        items = fetch_items()
+    references:
+      - https://docs.python.org/3/library/functions.html
+      - https://peps.python.org/pep-0008/#descriptive-naming-styles
+
+  - id: py-empty-except-pass
+    name: Exception caught and silently ignored
+    description: >
+      Flags except clauses that contain only pass, silently swallowing
+      the exception with no logging, re-raise, or handling.
+    descriptions:
+      business: >
+        This code catches errors and does nothing with them. When
+        something goes wrong, there is no log entry, no alert, no
+        indication that anything failed. Bugs hide behind silent
+        exceptions for weeks or months until they cause a bigger
+        failure that is much harder to diagnose.
+      developer: >
+        except SomeError: pass swallows the exception entirely. No
+        traceback, no log, no metric. The caller gets a None or default
+        return value with no indication of failure. At minimum, log the
+        exception. If the exception is truly expected and ignorable,
+        add a comment explaining why.
+    rationale: >
+      Silent exception swallowing is one of the most common sources of
+      hard-to-debug production issues. The error occurs, is caught, and
+      vanishes — no log, no metric, no alert. The function returns None
+      or a partial result, and the real failure manifests hours later
+      in a completely different part of the system. At minimum, log the
+      exception at warning level. If the exception is genuinely expected
+      (e.g., optional cleanup), add a comment explaining the rationale.
+    severity: warning
+    tags: [error-handling, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: |
+          try:
+              ...
+          except $EX:
+              pass
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Log the exception or add a comment explaining why it is intentionally ignored.
+      example: |
+        # Before — error silently swallowed
+        try:
+            send_notification(user)
+        except Exception:
+            pass
+
+        # After — error logged
+        try:
+            send_notification(user)
+        except Exception:
+            logger.warning("Failed to send notification", exc_info=True)
+    references:
+      - https://docs.python.org/3/tutorial/errors.html#handling-exceptions
+      - https://peps.python.org/pep-0008/#programming-recommendations
+
+  - id: py-star-import
+    name: Wildcard import pollutes namespace
+    description: >
+      Flags from module import * statements. Wildcard imports dump all
+      public names from the module into the current namespace, making
+      it impossible to tell where a name came from.
+    descriptions:
+      business: >
+        Wildcard imports make code unpredictable. When two modules export
+        the same name, the second import silently overrides the first.
+        A module update that adds a new exported name can break code that
+        was working fine, because the new name collides with a local one.
+        These bugs are invisible until they cause a production incident.
+      developer: >
+        from module import * imports all public names from module into
+        the current namespace. This causes name collisions, makes it
+        impossible for tools (IDEs, type checkers, linters) to resolve
+        names statically, and breaks when module authors add new exports.
+        Import specific names or use the module namespace.
+    rationale: >
+      Wildcard imports break tooling (IDEs cannot resolve references,
+      type checkers cannot verify types), cause silent name collisions
+      (two modules exporting the same name), and make code fragile
+      (adding an export to a dependency can shadow a local name). PEP 8
+      says wildcard imports "should be avoided" and they are explicitly
+      banned in __init__.py for packages that want to maintain a clean
+      public API. Import specific names or use the module as a namespace.
+    severity: warning
+    tags: [imports, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: from $MODULE import *
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Import specific names or use the module namespace.
+      example: |
+        # Before — pollutes namespace
+        from os.path import *
+
+        # After — explicit imports
+        from os.path import join, exists, dirname
+    references:
+      - https://docs.python.org/3/reference/simple_stmts.html#the-import-statement
+      - https://peps.python.org/pep-0008/#imports

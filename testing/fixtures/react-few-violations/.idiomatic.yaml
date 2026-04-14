@@ -1,0 +1,122 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: test-react-few-violations
+  name: Test React Few Violations
+  version: 0.0.1
+  description: Rules for integration test react-few-violations fixture.
+  maintainer: test
+
+rules:
+  - id: react-rules-of-hooks
+    name: Rules of Hooks
+    description: Flags violations of the Rules of Hooks.
+    rationale: Hooks must only be called at the top level of a component or custom hook.
+    severity: error
+    tags:
+      - hooks
+    detector:
+      backend: typescript
+      id: react-hooks/rules-of-hooks
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Move hooks to the top level of the component or custom hook.
+
+  - id: react-exhaustive-deps
+    name: Exhaustive dependency list for hooks
+    description: Flags hooks with incomplete dependency arrays.
+    rationale: Missing dependencies cause subtle bugs where effects run with stale data.
+    severity: warning
+    tags:
+      - hooks
+    detector:
+      backend: typescript
+      id: react-hooks/exhaustive-deps
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Add missing dependencies to the dependency array.
+
+  - id: react-no-direct-state-mutation
+    name: No direct state mutation
+    description: Flags code that directly mutates component state.
+    rationale: React detects state changes by reference equality.
+    severity: error
+    tags:
+      - state
+    detector:
+      backend: typescript
+      id: react/no-direct-mutation-state
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Use setState or hooks setters instead of directly mutating state.
+
+  - id: react-jsx-key
+    name: JSX key required for lists
+    description: Flags JSX elements rendered in a list that lack a key prop.
+    rationale: Without keys, React has to rely on position to match list items.
+    severity: error
+    tags:
+      - jsx
+    detector:
+      backend: typescript
+      id: react/jsx-key
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Add a key prop to elements in a list.
+
+  - id: react-no-array-index-key
+    name: Do not use array index as key
+    description: Flags list items that use the array index as the key prop.
+    rationale: Indices are unstable if the list can be reordered or filtered.
+    severity: warning
+    tags:
+      - jsx
+    detector:
+      backend: typescript
+      id: react/no-array-index-key
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Use a stable unique identifier as the key, not the array index.
+
+  - id: react-jsx-no-useless-fragment
+    name: No useless fragments
+    description: Flags JSX fragments that only contain a single child.
+    rationale: A fragment with a single child adds no value and clutters the code.
+    severity: warning
+    tags:
+      - jsx
+    detector:
+      backend: typescript
+      id: react/jsx-no-useless-fragment
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Remove the useless fragment or replace it with a real element.
+
+  - id: react-no-unstable-nested-components
+    name: Do not define components inside components
+    description: Flags function definitions that create a React component inside another component.
+    rationale: Nested components are recreated on every render, breaking state and performance.
+    severity: error
+    tags:
+      - components
+    detector:
+      backend: typescript
+      id: react/no-unstable-nested-components
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Define the component outside the parent component.

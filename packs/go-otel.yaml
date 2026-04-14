@@ -1,0 +1,758 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-otel
+  name: Go OpenTelemetry
+  version: 0.1.0
+  description: >
+    Principal-level OpenTelemetry instrumentation rules for Go services.
+    Catches trace propagation breaks, span lifecycle errors, missing error
+    recording, and observability anti-patterns that silently degrade your
+    distributed tracing pipeline.
+  descriptions:
+    business: >
+      Your team invested in distributed tracing so you can see exactly where
+      requests slow down or fail across services. This pack catches the
+      mistakes that silently break that investment — traces that stop
+      mid-way, errors that never show up in dashboards, and blind spots
+      where work happens but nobody can see it. Without these checks, your
+      tracing tools show green dashboards while customers experience errors,
+      and your on-call engineers spend extra hours during outages piecing
+      together what happened from scattered logs instead of one clear trace.
+    developer: >
+      OpenTelemetry gives you distributed tracing, but the API has sharp
+      edges that silently degrade your data. A span you forget to End()
+      leaks memory and never exports. An error you return without calling
+      RecordError() is invisible in Jaeger. A context.Background() in the
+      middle of a call chain orphans every downstream span into a new trace.
+      These rules enforce the patterns that make your traces actually useful
+      — proper span lifecycle, error recording on every error path, and
+      context propagation through goroutines and async boundaries. The kind
+      of stuff that works fine in happy-path testing but breaks your
+      observability at 3am when you need it most.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-otel.yaml
+  tags:
+    language: go
+    vendor: opentelemetry
+    category: observability
+    architecture: [services, workers, pipelines]
+
+rules:
+  # ── Span lifecycle ───────────────────────────────────────────
+
+  - id: go-otel-span-not-ended
+    name: Span created but never ended
+    description: >
+      Flags spans created via tracer.Start() that are not followed by a
+      corresponding defer span.End() call within the same function.
+    descriptions:
+      business: >
+        A trace operation was started but never finished. This is like
+        starting a stopwatch and never stopping it — the measurement is
+        useless, it leaks memory over time, and your tracing dashboards
+        show incomplete data. You're paying for tracing infrastructure
+        that can't give you accurate answers about where requests slow down.
+      developer: >
+        tracer.Start() was called without a matching defer span.End(). The
+        span object stays in memory forever, its data never reaches the
+        exporter, and the parent span's duration is wrong because it
+        includes a child that never finished. Always add defer span.End()
+        on the very next line after tracer.Start() — make it muscle memory.
+    rationale: >
+      An un-ended span is a resource leak in the OTel SDK. The span stays
+      in memory for the lifetime of the process, its data is never flushed
+      to the exporter, and the parent span's duration becomes meaningless
+      because it includes a child that never finished. In a high-throughput
+      service this silently inflates memory usage and produces incomplete
+      traces that make Jaeger/Tempo dashboards unreliable. The canonical
+      pattern is always defer span.End() immediately after tracer.Start().
+    severity: error
+    tags: [tracing, span-lifecycle, resource-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $CTX, $SPAN := $TRACER.Start(...)
+          - pattern-not-inside: |
+              $CTX, $SPAN := $TRACER.Start(...)
+              ...
+              defer $SPAN.End(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer span.End() immediately after tracer.Start().
+      example: |
+        // Before
+        ctx, span := tracer.Start(ctx, "processOrder")
+        // ... function body, span never ended
+
+        // After
+        ctx, span := tracer.Start(ctx, "processOrder")
+        defer span.End()
+        // ... function body
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans
+      - https://pkg.go.dev/go.opentelemetry.io/otel/trace#Span.End
+
+  - id: go-otel-discarded-span
+    name: Span assigned to blank identifier
+    description: >
+      Flags span values assigned to the blank identifier _ when calling
+      tracer.Start(). The span handle is needed to record errors, set
+      attributes, and set status.
+    descriptions:
+      business: >
+        A trace operation was created but the code immediately throws away
+        the handle needed to attach error details and metadata to it. It is
+        like installing a security camera but covering the lens -- the camera
+        is running and costing money, but you cannot review footage when
+        something goes wrong. Your dashboards will show the operation
+        happened yet never reveal whether it succeeded or failed.
+      developer: >
+        Assigning the span to _ discards the only handle you have for
+        calling RecordError(), SetStatus(), or SetAttributes(). The span
+        still gets exported, but it carries zero useful data -- no error
+        info, no status, no attributes. Either assign it to a named variable
+        and use it properly, or remove the tracer.Start() call entirely if
+        the span adds no value.
+    rationale: >
+      Assigning the span to _ means you get context propagation but lose
+      the ability to record errors, set attributes, or mark the span as
+      failed. The span will appear in your trace backend as a silent
+      success with zero metadata — making it worse than having no span at
+      all, because it creates a false sense of coverage. If the span truly
+      carries no value, remove the tracer.Start() call entirely rather than
+      discarding the handle.
+    severity: error
+    tags: [tracing, span-lifecycle]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: "$CTX, _ = $TRACER.Start(...)"
+          - pattern: "$CTX, _ := $TRACER.Start(...)"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Assign the span to a named variable so you can record errors and set status on it.
+      example: |
+        // Before
+        ctx, _ := tracer.Start(ctx, "handleRequest")
+
+        // After
+        ctx, span := tracer.Start(ctx, "handleRequest")
+        defer span.End()
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans
+      - https://pkg.go.dev/go.opentelemetry.io/otel/trace#Span
+
+  - id: go-otel-end-before-record-error
+    name: span.End() called before RecordError or SetStatus
+    description: >
+      Flags code where span.End() is called before span.RecordError() or
+      span.SetStatus(). Once a span is ended, subsequent calls to modify it
+      are no-ops in the OTel SDK.
+    descriptions:
+      business: >
+        Error information is being recorded on a trace operation that has
+        already been closed. The tracing system silently ignores these
+        late writes, so when something fails, your dashboards show the
+        operation as successful. During an outage, your team will waste
+        time because the tracing tool says everything is fine while
+        customers are experiencing errors.
+      developer: >
+        The OTel spec makes spans immutable after End() is called. Any
+        RecordError() or SetStatus() after End() is a silent no-op -- no
+        error, no warning, just lost data. The fix is simple: use
+        defer span.End() immediately after tracer.Start() so that End()
+        always runs last, after all your error-recording logic has executed.
+    rationale: >
+      The OTel specification states that after End() is called, the span
+      becomes immutable. Any RecordError() or SetStatus() call after End()
+      is silently dropped. This means your error data never reaches the
+      trace backend, and the span appears successful even though an error
+      occurred. This is particularly insidious because the code compiles
+      and runs without any error — the data just disappears. Always use
+      defer span.End() as the LAST defer so it runs after error recording.
+    severity: error
+    tags: [tracing, span-lifecycle, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: |
+              $SPAN.End(...)
+              ...
+              $SPAN.RecordError(...)
+          - pattern: |
+              $SPAN.End(...)
+              ...
+              $SPAN.SetStatus(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move span.End() after all RecordError/SetStatus calls, or use defer span.End() immediately after creation.
+      example: |
+        // Before — error data silently dropped
+        span.End()
+        if err != nil {
+            span.RecordError(err)
+            span.SetStatus(codes.Error, err.Error())
+        }
+
+        // After — defer ensures End() runs last
+        defer span.End()
+        if err != nil {
+            span.RecordError(err)
+            span.SetStatus(codes.Error, err.Error())
+        }
+    references:
+      - https://opentelemetry.io/docs/specs/otel/trace/api/#end
+      - https://pkg.go.dev/go.opentelemetry.io/otel/trace#Span.End
+
+  # ── Error handling ───────────────────────────────────────────
+
+  - id: go-otel-error-without-record
+    name: Error returned without span.RecordError()
+    description: >
+      Flags error return paths inside a traced function that do not call
+      span.RecordError() before returning. The error will be invisible
+      in trace backends like Jaeger, Tempo, or Honeycomb.
+    descriptions:
+      business: >
+        When an error occurs, the tracing system is not told about it. Your
+        error dashboards and alerting rely on traces to count failures, so
+        this error becomes invisible to your monitoring. During an outage,
+        engineers have to dig through raw logs instead of clicking a trace
+        to see exactly what went wrong -- adding minutes to incident
+        response time and extending customer impact.
+      developer: >
+        You are returning an error from a traced function without calling
+        span.RecordError(err). The span exports successfully but carries
+        no exception event, so Jaeger/Tempo has no idea anything failed.
+        Always call span.RecordError(err) on every error path before the
+        return. Pair it with span.SetStatus(codes.Error, err.Error()) so
+        the span is also visually marked as failed.
+    rationale: >
+      RecordError() creates an exception event on the span with the error
+      message, type, and stack trace. Without it, your trace backend shows
+      the span but has no idea an error occurred — you have to cross-reference
+      logs to figure out what went wrong. This defeats the purpose of
+      distributed tracing: you want a single pane of glass where clicking
+      a span reveals the exact error. Every principal engineer enforces this
+      pattern because without it, incident responders waste precious
+      minutes correlating logs with traces during outages.
+    severity: warning
+    tags: [tracing, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              if $ERR != nil {
+                ...
+                return ..., $ERR
+              }
+          - pattern-inside: |
+              $CTX, $SPAN := $TRACER.Start(...)
+              ...
+          - pattern-not-inside: |
+              if $ERR != nil {
+                ...
+                $SPAN.RecordError(...)
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Call span.RecordError(err) before returning the error.
+      example: |
+        // Before — error invisible in traces
+        ctx, span := tracer.Start(ctx, "fetchUser")
+        defer span.End()
+        user, err := db.GetUser(ctx, id)
+        if err != nil {
+            return nil, err
+        }
+
+        // After — error appears as span event
+        ctx, span := tracer.Start(ctx, "fetchUser")
+        defer span.End()
+        user, err := db.GetUser(ctx, id)
+        if err != nil {
+            span.RecordError(err)
+            span.SetStatus(codes.Error, err.Error())
+            return nil, err
+        }
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#record-errors
+      - https://pkg.go.dev/go.opentelemetry.io/otel/trace#Span.RecordError
+
+  - id: go-otel-error-without-set-status
+    name: Error returned without span.SetStatus(codes.Error)
+    description: >
+      Flags error return paths inside a traced function that do not call
+      span.SetStatus(codes.Error, ...) before returning. The span will
+      appear as successful in the trace UI.
+    descriptions:
+      business: >
+        Even though errors are occurring, the tracing UI shows these
+        operations as green and successful. Your error-rate dashboards,
+        SLO calculations, and automated alerts all depend on spans being
+        marked as failed when they fail. Without this, your team believes
+        the system is healthier than it actually is, and you miss early
+        warning signs that could prevent a full outage.
+      developer: >
+        RecordError() attaches the error as an event, but SetStatus(codes.Error, ...)
+        is what flips the span to a failed state in the trace UI. Without
+        it, the span stays green even with an error event attached. Trace
+        backends filter on status for error-rate queries and alerting, so
+        a missing SetStatus means your span is effectively invisible to
+        "show me failures" workflows. Always pair RecordError with SetStatus.
+    rationale: >
+      RecordError() adds an event, but SetStatus(codes.Error, ...) is what
+      makes the span show up as red/failed in your trace UI. Without it,
+      the span appears green/successful even though an error occurred.
+      Trace backends use span status for error-rate calculations, alerting,
+      and the critical "show me all failed spans" query. If you only call
+      RecordError without SetStatus, the error event exists but the span
+      itself looks healthy — misleading dashboards, missed alerts, and
+      incorrect SLO calculations.
+    severity: warning
+    tags: [tracing, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              if $ERR != nil {
+                ...
+                return ..., $ERR
+              }
+          - pattern-inside: |
+              $CTX, $SPAN := $TRACER.Start(...)
+              ...
+          - pattern-not-inside: |
+              if $ERR != nil {
+                ...
+                $SPAN.SetStatus(...)
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Call span.SetStatus(codes.Error, err.Error()) before returning the error.
+      example: |
+        // Before — span appears successful despite error
+        ctx, span := tracer.Start(ctx, "chargePayment")
+        defer span.End()
+        if err := payments.Charge(ctx, amount); err != nil {
+            span.RecordError(err)
+            return err
+        }
+
+        // After — span correctly marked as failed
+        ctx, span := tracer.Start(ctx, "chargePayment")
+        defer span.End()
+        if err := payments.Charge(ctx, amount); err != nil {
+            span.RecordError(err)
+            span.SetStatus(codes.Error, err.Error())
+            return err
+        }
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#set-span-status
+      - https://pkg.go.dev/go.opentelemetry.io/otel/codes
+
+  # ── Context propagation ─────────────────────────────────────
+
+  - id: go-otel-context-background-in-traced
+    name: context.Background() used inside traced function
+    description: >
+      Flags usage of context.Background() inside a function that already
+      receives a context.Context parameter. This creates a new root context,
+      breaking trace propagation.
+    descriptions:
+      business: >
+        A request's trace is being cut in half at this point in the code.
+        Instead of seeing one continuous trace from the user's click through
+        every service, your team sees two disconnected fragments. This means
+        engineers cannot follow a slow or failing request end-to-end during
+        an incident, doubling the time it takes to find the root cause and
+        restore service for customers.
+      developer: >
+        context.Background() creates a brand-new empty context with no
+        trace ID, no parent span, and no baggage. Using it inside a
+        function that already has a ctx parameter orphans every downstream
+        span into a separate trace. Pass the existing ctx through instead.
+        This is the most common cause of broken traces in Go services.
+    rationale: >
+      context.Background() creates a fresh, empty context with no parent
+      span, no trace ID, and no baggage. If you use it inside a function
+      that already has a context parameter, any downstream spans become
+      orphans — they start a new trace instead of continuing the existing
+      one. This is the number one cause of "broken traces" in distributed
+      systems. Your service A calls service B, but the Jaeger/Tempo UI
+      shows them as two separate traces instead of a connected waterfall.
+      Always pass the incoming context through to preserve the trace chain.
+    severity: warning
+    tags: [tracing, context-propagation]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: context.Background()
+          - pattern-inside: |
+              func $F(..., $CTX context.Context, ...) (...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use the context.Context parameter passed to this function instead of context.Background().
+      example: |
+        // Before — trace chain broken
+        func ProcessOrder(ctx context.Context, order Order) error {
+            dbCtx := context.Background()  // orphans all downstream spans
+            return db.Save(dbCtx, order)
+        }
+
+        // After — trace chain preserved
+        func ProcessOrder(ctx context.Context, order Order) error {
+            return db.Save(ctx, order)
+        }
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#go-context
+      - https://pkg.go.dev/context#Background
+
+  - id: go-otel-context-todo-in-service
+    name: context.TODO() used in service code
+    description: >
+      Flags usage of context.TODO() in non-test, non-main service code.
+      context.TODO() is a placeholder intended for use during refactoring
+      when the correct context is not yet available.
+    descriptions:
+      business: >
+        A temporary placeholder was left in production code where proper
+        request tracking should be. This breaks the trace chain at that
+        point, meaning your tracing dashboards cannot connect the dots
+        between services. It also means request timeouts and cancellations
+        will not propagate through this code path, potentially wasting
+        server resources on work that nobody is waiting for anymore.
+      developer: >
+        context.TODO() is functionally identical to context.Background() --
+        it is a development-time placeholder signaling "I need to plumb a
+        real context here." If it reached production, trace propagation and
+        cancellation are both broken at this call site. The fix is to add
+        a context.Context parameter to the function and thread the caller's
+        context through.
+    rationale: >
+      context.TODO() is semantically identical to context.Background() but
+      signals "I know I need a real context here but haven't plumbed it
+      through yet." Shipping context.TODO() to production means you shipped
+      the refactoring placeholder — trace propagation is broken at that
+      call site, and deadlines/cancellation won't propagate. In a properly
+      instrumented service, every function in the call chain should receive
+      its context from the caller. context.TODO() in production is
+      technical debt that silently degrades your entire observability stack.
+    severity: warning
+    tags: [tracing, context-propagation]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: context.TODO()
+          - pattern-not-inside: |
+              func Test$NAME(...) { ... }
+          - pattern-not-inside: |
+              func main() { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Replace context.TODO() with the context.Context from the calling function's parameters.
+      example: |
+        // Before — placeholder shipped to production
+        func (s *Service) Sync() error {
+            ctx := context.TODO()
+            return s.repo.FetchAll(ctx)
+        }
+
+        // After — proper context propagation
+        func (s *Service) Sync(ctx context.Context) error {
+            return s.repo.FetchAll(ctx)
+        }
+    references:
+      - https://pkg.go.dev/context#TODO
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#go-context
+
+  - id: go-otel-goroutine-without-context
+    name: Goroutine in traced function without context propagation
+    description: >
+      Flags goroutines launched inside a traced function that do not
+      accept a context.Context parameter. The goroutine's work will be
+      invisible in the trace.
+    descriptions:
+      business: >
+        Background work is being kicked off without connecting it to the
+        request's trace. Any latency, errors, or resource consumption from
+        this work is completely invisible to your monitoring. If this
+        background work is slow or failing, you have no way to see it in
+        your dashboards, and on-call engineers will struggle to diagnose
+        issues that originate in these invisible code paths.
+      developer: >
+        A goroutine launched inside a traced function without receiving the
+        parent context creates an orphaned execution path. Any spans started
+        inside that goroutine will begin a brand-new trace instead of
+        appearing as children of the current span. Pass ctx into the
+        goroutine as a parameter -- do not capture it via closure, as that
+        risks data races with the parent goroutine.
+    rationale: >
+      When you launch a goroutine inside a traced function without passing
+      the span context, the goroutine creates a detached execution path.
+      Any spans created inside the goroutine start a new trace instead of
+      appearing as children of the current span. This fragments your trace
+      data — you see the parent span complete but have no visibility into
+      the concurrent work it spawned. For incident response, this is a
+      blind spot: latency from the goroutine doesn't appear in the parent
+      trace, and errors in the goroutine's work are silently orphaned.
+      Always pass the context (or a derived context) into goroutines.
+    severity: warning
+    tags: [tracing, context-propagation, concurrency]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              go func() { ... }()
+          - pattern-inside: |
+              $CTX, $SPAN := $TRACER.Start(...)
+              ...
+          - pattern-not-inside: |
+              go func($PARAM context.Context) { ... }($CTX)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Pass the span context into the goroutine as a parameter.
+      example: |
+        // Before — goroutine work is invisible in traces
+        ctx, span := tracer.Start(ctx, "fanOut")
+        defer span.End()
+        go func() {
+            processItem(item)
+        }()
+
+        // After — goroutine continues the trace
+        ctx, span := tracer.Start(ctx, "fanOut")
+        defer span.End()
+        go func(ctx context.Context) {
+            processItem(ctx, item)
+        }(ctx)
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#go-context
+      - https://pkg.go.dev/context
+
+  # ── Dependency injection & testability ───────────────────────
+
+  - id: go-otel-global-tracer-provider
+    name: Using global TracerProvider instead of injected dependency
+    description: >
+      Flags direct calls to otel.GetTracerProvider() or otel.Tracer()
+      outside of main/init/setup code. The TracerProvider should be
+      injected as a dependency.
+    descriptions:
+      business: >
+        The tracing setup is hardwired into the code instead of being
+        configurable. This makes the code harder to test, which means
+        bugs slip through to production more easily. It also prevents
+        your team from applying different tracing strategies to different
+        parts of the system -- for example, tracing every payment request
+        but only sampling a fraction of health checks to control costs.
+      developer: >
+        Calling otel.GetTracerProvider() or otel.Tracer() directly creates
+        a hidden global dependency. You cannot swap in a test exporter
+        without mutating global state, and you cannot use different
+        TracerProviders for different subsystems. Inject trace.TracerProvider
+        into your struct at construction time, the same way you would inject
+        a database pool or HTTP client.
+    rationale: >
+      Calling otel.GetTracerProvider() or otel.Tracer() directly couples
+      your code to the global OTel state. This makes unit testing painful
+      because you have to manipulate global state to swap in a test
+      exporter, creates hidden dependencies that aren't visible in function
+      signatures, and makes it impossible to use different TracerProviders
+      for different subsystems (e.g., sampling differently for health
+      checks vs business logic). Inject trace.TracerProvider into your
+      structs at construction time, just like you would a database
+      connection or HTTP client.
+    severity: info
+    tags: [tracing, dependency-injection, testability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: otel.GetTracerProvider()
+          - pattern: otel.Tracer(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/main.go", "**/cmd/**"]
+    fix:
+      message: Inject trace.TracerProvider as a struct field or constructor parameter instead of using the global accessor.
+      example: |
+        // Before — hidden global dependency
+        func (s *OrderService) Create(ctx context.Context, o Order) error {
+            tracer := otel.Tracer("orders")
+            ctx, span := tracer.Start(ctx, "CreateOrder")
+            defer span.End()
+            // ...
+        }
+
+        // After — explicit, testable dependency
+        type OrderService struct {
+            tracer trace.Tracer
+        }
+
+        func NewOrderService(tp trace.TracerProvider) *OrderService {
+            return &OrderService{tracer: tp.Tracer("orders")}
+        }
+
+        func (s *OrderService) Create(ctx context.Context, o Order) error {
+            ctx, span := s.tracer.Start(ctx, "CreateOrder")
+            defer span.End()
+            // ...
+        }
+    references:
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#getting-a-tracer
+      - https://pkg.go.dev/go.opentelemetry.io/otel/trace#TracerProvider
+
+  # ── Naming & conventions ─────────────────────────────────────
+
+  - id: go-otel-string-literal-span-name
+    name: Inline string literal used as span name
+    description: >
+      Flags span creation where the span name is an inline string literal
+      rather than a named constant. Span names should be constants for
+      consistent trace aggregation.
+    descriptions:
+      business: >
+        Trace operation names are scattered as raw text strings throughout
+        the code. A single typo creates a separate entry in your dashboards,
+        splitting metrics for what should be one operation into two. This
+        makes latency and error-rate charts unreliable and can cause alerts
+        to miss real problems because the numbers are fragmented across
+        slightly different names.
+      developer: >
+        Inline string literals for span names lead to inconsistent naming
+        across the codebase -- "getUser" vs "GetUser" vs "get_user" all
+        become separate aggregation buckets in your trace backend. Extract
+        span names into package-level constants so they are searchable,
+        refactorable, and guaranteed consistent. This matters most in
+        services with many spans where dashboard reliability depends on
+        exact name matching.
+    rationale: >
+      Trace backends aggregate spans by name to compute latency percentiles,
+      error rates, and throughput. When span names are inline string
+      literals scattered across the codebase, typos and inconsistent naming
+      (e.g., "getUser" vs "GetUser" vs "get-user") fragment your
+      aggregation and make dashboards unreliable. Defining span names as
+      package-level constants ensures consistency, enables IDE-powered
+      refactoring, and makes it trivial to search for all instrumentation
+      points. This is especially critical in services with hundreds of
+      spans where a naming typo can hide errors behind an unmonitored
+      span name.
+    severity: info
+    tags: [tracing, naming]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: $TRACER.Start($CTX, "...")
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Extract the span name to a package-level const for consistent aggregation.
+      example: |
+        // Before — inline string, easy to typo
+        ctx, span := tracer.Start(ctx, "processOrder")
+
+        // After — constant, searchable, refactorable
+        const spanProcessOrder = "OrderService.ProcessOrder"
+        // ...
+        ctx, span := tracer.Start(ctx, spanProcessOrder)
+    references:
+      - https://opentelemetry.io/docs/specs/otel/trace/api/#span
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans
+
+  # ── Performance ──────────────────────────────────────────────
+
+  - id: go-otel-span-set-attributes-in-loop
+    name: span.SetAttributes() called inside a loop
+    description: >
+      Flags calls to span.SetAttributes() inside a for loop. Attributes
+      should be batched or set once to avoid per-iteration overhead on
+      the hot path.
+    descriptions:
+      business: >
+        Trace metadata is being written one piece at a time inside a loop
+        instead of all at once. For loops processing thousands of items,
+        this adds measurable latency to every request because each write
+        acquires a lock internally. Your service handles fewer requests per
+        second than it should, and the per-request latency your customers
+        experience is higher than necessary -- all from an instrumentation
+        pattern that provides no extra value.
+      developer: >
+        Each span.SetAttributes() call acquires the span's mutex, copies
+        the key-value pairs, and may allocate. In a hot loop this adds
+        O(n) lock acquisitions. If you are setting the same key each
+        iteration, only the last value survives anyway, making every prior
+        call pure overhead. Collect attributes during the loop and call
+        SetAttributes() once after the loop with the full slice.
+    rationale: >
+      Each SetAttributes() call acquires a lock on the span, copies the
+      attribute key-value pairs, and potentially triggers memory
+      allocations. In a tight loop processing thousands of items, this
+      adds measurable latency. Worse, if you're setting the same attribute
+      key in each iteration, only the last value is kept — so all the
+      intermediate calls are pure waste. Collect the data you need during
+      the loop, then set attributes once after the loop completes, or
+      use a single SetAttributes() call with all key-value pairs batched
+      into a slice.
+    severity: warning
+    tags: [tracing, performance]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $SPAN.SetAttributes(...)
+          - pattern-inside: |
+              for ... { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Collect attributes during the loop and call SetAttributes() once after the loop.
+      example: |
+        // Before — lock acquired on every iteration
+        for _, item := range items {
+            span.SetAttributes(attribute.String("item.id", item.ID))
+            process(item)
+        }
+
+        // After — single call with batched attributes
+        attrs := make([]attribute.KeyValue, 0, len(items))
+        for _, item := range items {
+            process(item)
+            attrs = append(attrs, attribute.String("item.id", item.ID))
+        }
+        span.SetAttributes(attrs...)
+    references:
+      - https://pkg.go.dev/go.opentelemetry.io/otel/trace#Span.SetAttributes
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#span-attributes

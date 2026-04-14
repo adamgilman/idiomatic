@@ -1,0 +1,788 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: react-18-starter
+  name: React 18+ Starter
+  version: 0.1.0
+  description: >
+    Foundational React rules for React 18+ projects using functional components
+    exclusively. Enforces hooks discipline, bans class components, catches
+    deprecated API usage (ReactDOM.render), and enforces JSX correctness and
+    performance patterns suited for concurrent mode.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/react-18-starter.yaml
+
+rules:
+  # Hooks discipline
+  - id: react-rules-of-hooks
+    name: Enforce Rules of Hooks
+    description: |
+      Hooks must be called at the top level and only from React functions.
+      Violating this leads to subtle state bugs and incorrect component behavior.
+    rationale: |
+      Hooks must be called at the top level of React function components or custom
+      hooks, and never conditionally. Calling hooks inside conditionals, loops, or
+      nested functions breaks React's assumptions about hook ordering and causes
+      state to be associated with the wrong piece of state.
+    severity: error
+    tags:
+      - hooks
+      - react
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react-hooks/rules-of-hooks
+        plugin: eslint-plugin-react-hooks
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Move hook calls to the top level of the component. Do not call hooks inside conditionals, loops, or nested functions.
+      example: |
+        // bad
+        function MyComponent({ show }) {
+          if (show) {
+            const [val, setVal] = useState(0);
+          }
+        }
+        // good
+        function MyComponent({ show }) {
+          const [val, setVal] = useState(0);
+        }
+    tests:
+      - name: hook inside conditional fires
+        should: fire
+        code: |
+          function MyComponent({ show }) {
+            if (show) {
+              const [val, setVal] = useState(0);
+            }
+          }
+      - name: hook at top level passes
+        should: pass
+        code: |
+          function MyComponent({ show }) {
+            const [val, setVal] = useState(0);
+          }
+
+  - id: react-exhaustive-deps
+    name: Exhaustive Dependency Arrays
+    description: |
+      All referenced variables must be included in useEffect, useCallback, and
+      useMemo dependency arrays.
+    rationale: |
+      Missing dependencies in useEffect/useCallback/useMemo cause stale closures
+      where the effect captures old values. This leads to subtle bugs where effects
+      don't re-run when needed or event handlers use stale data.
+    severity: warning
+    tags:
+      - hooks
+      - react
+      - performance
+    detector:
+      capability: eslint
+      config:
+        rule: react-hooks/exhaustive-deps
+        plugin: eslint-plugin-react-hooks
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Add all referenced variables to the dependency array, or restructure to avoid the dependency.
+      example: |
+        // bad
+        useEffect(() => { fetchData(userId); }, []);
+        // good
+        useEffect(() => { fetchData(userId); }, [userId]);
+    tests:
+      - name: missing dependency in useEffect fires
+        should: fire
+        code: |
+          useEffect(() => { fetchData(userId); }, []);
+      - name: complete dependencies passes
+        should: pass
+        code: |
+          useEffect(() => { fetchData(userId); }, [userId]);
+
+  - id: react-hook-use-state
+    name: Consistent useState Destructuring
+    description: |
+      Enforces consistent destructuring of useState return values for readability.
+    rationale: |
+      When destructuring useState, naming variables descriptively (e.g., [isOpen, setIsOpen])
+      improves code clarity and makes setter functions immediately identifiable. This pattern
+      helps prevent accidentally passing state to setters.
+    severity: warning
+    tags:
+      - react
+      - style
+      - hooks
+    detector:
+      capability: eslint
+      config:
+        rule: react/hook-use-state
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Destructure useState as [value, setValue] with semantically named variables.
+      example: |
+        // bad
+        const state = useState(false);
+        // good
+        const [isOpen, setIsOpen] = useState(false);
+    tests:
+      - name: undestuctured useState fires
+        should: fire
+        code: |
+          const state = useState(false);
+      - name: destructured useState passes
+        should: pass
+        code: |
+          const [isOpen, setIsOpen] = useState(false);
+
+  # Class component enforcement
+  - id: react-prefer-stateless-function
+    name: Prefer functional components
+    description: |
+      Flags class components that can be replaced with a functional component.
+    rationale: |
+      React 18+ projects should use functional components exclusively.
+      Class components are a legacy pattern that prevents adoption of hooks
+      and concurrent features. Ban them at the linter level.
+    severity: error
+    tags:
+      - react
+      - functional
+    detector:
+      capability: eslint
+      config:
+        rule: react/prefer-stateless-function
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Convert the class component to a functional component using hooks.
+      example: |
+        // Before
+        class Counter extends React.Component {
+          render() { return <span>{this.props.count}</span>; }
+        }
+        // After
+        function Counter({ count }) { return <span>{count}</span>; }
+
+  - id: react-no-deprecated
+    name: No Deprecated APIs
+    description: |
+      Deprecated React APIs are removed in later versions and should not be used.
+    rationale: |
+      React 18 removed ReactDOM.render in favor of createRoot. Using deprecated APIs
+      such as ReactDOM.render blocks adoption of concurrent features and will cause
+      runtime errors in React 18+ applications. Migrate to the new root API.
+    severity: warning
+    tags:
+      - react
+      - compatibility
+    detector:
+      capability: eslint
+      config:
+        rule: react/no-deprecated
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Replace ReactDOM.render with createRoot. Replace deprecated lifecycle methods with hooks.
+      example: |
+        // bad
+        ReactDOM.render(<App />, document.getElementById('root'));
+        // good
+        createRoot(document.getElementById('root')).render(<App />);
+    tests:
+      - name: deprecated ReactDOM.render fires
+        should: fire
+        code: |
+          ReactDOM.render(<App />, document.getElementById('root'));
+      - name: createRoot passes
+        should: pass
+        code: |
+          createRoot(document.getElementById('root')).render(<App />);
+
+  # JSX correctness
+  - id: react-jsx-key
+    name: JSX Lists Must Have Keys
+    description: |
+      Every element in a JSX list must have a unique, stable key prop.
+    rationale: |
+      Missing keys in lists cause React to misidentify elements during reconciliation.
+      When list items are reordered, filtered, or deleted, React associates state and
+      DOM nodes incorrectly, producing incorrect UI updates and lost component state.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/jsx-key
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Add a stable, unique key prop to every element in a list. Avoid using array index as key when list order can change.
+      example: |
+        // bad
+        items.map(item => <Item />)
+        // good
+        items.map(item => <Item key={item.id} />)
+    tests:
+      - name: list without key fires
+        should: fire
+        code: |
+          items.map(item => <Item />)
+      - name: list with key passes
+        should: pass
+        code: |
+          items.map(item => <Item key={item.id} />)
+
+  - id: react-jsx-no-duplicate-props
+    name: No Duplicate JSX Props
+    description: |
+      JSX elements must not have duplicate props.
+    rationale: |
+      Duplicate props silently discard one value, making code confusing and hiding
+      accidental overwrites. The last prop value wins, but this is usually a mistake.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/jsx-no-duplicate-props
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Remove or merge duplicate JSX props.
+      example: |
+        // bad
+        <Input className="a" className="b" />
+        // good
+        <Input className="a b" />
+    tests:
+      - name: duplicate props fires
+        should: fire
+        code: |
+          <Input className="a" className="b" />
+      - name: single prop passes
+        should: pass
+        code: |
+          <Input className="a b" />
+
+  - id: react-jsx-no-target-blank
+    name: Links with target=_blank Must Have Rel
+    description: |
+      Links with target="_blank" must include rel="noreferrer" for security.
+    rationale: |
+      Opening links with target="_blank" without rel="noreferrer" exposes users to
+      reverse tabnapping attacks. The opened page can access the window.opener property
+      and navigate the original tab to a malicious URL.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - security
+    detector:
+      capability: eslint
+      config:
+        rule: react/jsx-no-target-blank
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Add rel="noreferrer" (or rel="noopener noreferrer") whenever target="_blank" is used.
+      example: |
+        // bad
+        <a href={url} target="_blank">link</a>
+        // good
+        <a href={url} target="_blank" rel="noreferrer">link</a>
+    tests:
+      - name: target blank without rel fires
+        should: fire
+        code: |
+          <a href={url} target="_blank">link</a>
+      - name: target blank with rel passes
+        should: pass
+        code: |
+          <a href={url} target="_blank" rel="noreferrer">link</a>
+
+  - id: react-void-dom-elements-no-children
+    name: Void Elements Cannot Have Children
+    description: |
+      Void elements (br, hr, img, input) cannot have children in React.
+    rationale: |
+      Void elements are self-closing by definition in HTML. Attempting to pass
+      children to void elements causes a React runtime error and invalid markup.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/void-dom-elements-no-children
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Remove children from void elements such as br, hr, img, and input.
+      example: |
+        // bad
+        <br>text</br>
+        // good
+        <br />
+    tests:
+      - name: br with children fires
+        should: fire
+        code: |
+          <br>text</br>
+      - name: self-closing br passes
+        should: pass
+        code: |
+          <br />
+
+  - id: react-no-unknown-property
+    name: Use Valid JSX Properties
+    description: |
+      Unknown DOM properties are silently ignored by browsers, hiding typos.
+    rationale: |
+      React JSX has different property names than HTML attributes (e.g., className
+      instead of class). Using HTML attribute names in JSX silently fails because
+      they are passed to the DOM, which ignores unknown attributes.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/no-unknown-property
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Use the correct React JSX property name (e.g. className instead of class, htmlFor instead of for).
+      example: |
+        // bad
+        <div class="box" />
+        // good
+        <div className="box" />
+    tests:
+      - name: html class attribute fires
+        should: fire
+        code: |
+          <div class="box" />
+      - name: jsx className passes
+        should: pass
+        code: |
+          <div className="box" />
+
+  - id: react-button-has-type
+    name: Buttons Must Have Explicit Type
+    description: |
+      Button elements must have an explicit type prop.
+    rationale: |
+      A button without an explicit type defaults to "submit", accidentally submitting
+      forms when used as a generic action button. This causes unwanted form submissions
+      and confuses users.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/button-has-type
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Always specify type="button", type="submit", or type="reset" on button elements.
+      example: |
+        // bad
+        <button onClick={handleClick}>Click</button>
+        // good
+        <button type="button" onClick={handleClick}>Click</button>
+    tests:
+      - name: button without type fires
+        should: fire
+        code: |
+          <button onClick={handleClick}>Click</button>
+      - name: button with type passes
+        should: pass
+        code: |
+          <button type="button" onClick={handleClick}>Click</button>
+
+  # JSX style patterns
+  - id: react-no-array-index-key
+    name: Don't Use Array Index as Key
+    description: |
+      Using array index as key causes reconciliation bugs when list items change.
+    rationale: |
+      Array index is unstable when list order changes. When items are reordered,
+      filtered, or deleted, indices change. React will associate the wrong state
+      and DOM nodes with the wrong items.
+    severity: warning
+    tags:
+      - react
+      - jsx
+      - performance
+    detector:
+      capability: eslint
+      config:
+        rule: react/no-array-index-key
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Use a stable unique identifier from your data as the key instead of the array index.
+      example: |
+        // bad
+        items.map((item, i) => <Item key={i} />)
+        // good
+        items.map(item => <Item key={item.id} />)
+    tests:
+      - name: index as key fires
+        should: fire
+        code: |
+          items.map((item, i) => <Item key={i} />)
+      - name: stable id as key passes
+        should: pass
+        code: |
+          items.map(item => <Item key={item.id} />)
+
+  - id: react-jsx-no-useless-fragment
+    name: Remove Useless Fragment Wrappers
+    description: |
+      Fragment wrappers around a single child add unnecessary nesting.
+    rationale: |
+      Fragments are useful for returning multiple elements without adding a DOM node.
+      When wrapping only a single child, the fragment adds noise without benefit.
+    severity: warning
+    tags:
+      - react
+      - jsx
+      - style
+    detector:
+      capability: eslint
+      config:
+        rule: react/jsx-no-useless-fragment
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Remove the fragment wrapper when it contains only one child.
+      example: |
+        // bad
+        return <><Child /></>;
+        // good
+        return <Child />;
+    tests:
+      - name: single child fragment fires
+        should: fire
+        code: |
+          return <><Child /></>;
+      - name: no fragment passes
+        should: pass
+        code: |
+          return <Child />;
+
+  - id: react-self-closing-comp
+    name: Use Self-Closing Component Syntax
+    description: |
+      Components and DOM elements without children should use self-closing syntax.
+    rationale: |
+      Self-closing tags are more concise and clearly indicate no children are expected.
+      This improves readability and reduces boilerplate.
+    severity: warning
+    tags:
+      - react
+      - jsx
+      - style
+    detector:
+      capability: eslint
+      config:
+        rule: react/self-closing-comp
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Replace <Component></Component> with <Component /> when there are no children.
+      example: |
+        // bad
+        <Input></Input>
+        // good
+        <Input />
+    tests:
+      - name: empty component tag fires
+        should: fire
+        code: |
+          <Input></Input>
+      - name: self-closing component passes
+        should: pass
+        code: |
+          <Input />
+
+  - id: react-jsx-no-leaked-render
+    name: Avoid Short-Circuit Rendering with Falsy Values
+    description: |
+      Short-circuit rendering with numeric values renders unwanted output to the DOM.
+    rationale: |
+      Short-circuit rendering (count && <Comp />) renders "0" to the DOM when count
+      is 0 (falsy but still rendered). Use a boolean expression or ternary to prevent
+      rendering unwanted values.
+    severity: error
+    tags:
+      - react
+      - jsx
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/jsx-no-leaked-render
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Use a boolean expression or ternary instead of short-circuit with numeric/falsy left-hand sides.
+      example: |
+        // bad
+        {count && <Badge />}
+        // good
+        {count > 0 && <Badge />}
+    tests:
+      - name: numeric short-circuit fires
+        should: fire
+        code: |
+          {count && <Badge />}
+      - name: boolean short-circuit passes
+        should: pass
+        code: |
+          {count > 0 && <Badge />}
+
+  # Component stability
+  - id: react-no-unstable-nested-components
+    name: Don't Define Components Inside Render
+    description: |
+      Defining components inside render creates new references every render.
+    rationale: |
+      Defining a component inside render creates a new class/function reference on
+      every render. React treats this as a completely new component, remounting it
+      and losing all state. This causes performance issues and state loss.
+    severity: error
+    tags:
+      - react
+      - performance
+      - essential
+    detector:
+      capability: eslint
+      config:
+        rule: react/no-unstable-nested-components
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Move component definitions outside the parent render function or to a separate module.
+      example: |
+        // bad
+        function Parent() {
+          const Child = () => <span>hi</span>;
+          return <Child />;
+        }
+        // good
+        const Child = () => <span>hi</span>;
+        function Parent() { return <Child />; }
+    tests:
+      - name: nested component definition fires
+        should: fire
+        code: |
+          function Parent() {
+            const Child = () => <span>hi</span>;
+            return <Child />;
+          }
+      - name: component defined outside passes
+        should: pass
+        code: |
+          const Child = () => <span>hi</span>;
+          function Parent() { return <Child />; }
+
+  # Refs
+  - id: react-forward-ref-uses-ref
+    name: forwardRef must use the ref parameter
+    description: |
+      Flags forwardRef callbacks that do not use the forwarded ref parameter.
+    rationale: |
+      A forwardRef callback that ignores its ref parameter defeats the
+      purpose of the API and is almost certainly a mistake. The ref must
+      be attached to a DOM element or passed to a child component.
+    severity: warning
+    tags:
+      - react
+      - refs
+    detector:
+      capability: eslint
+      config:
+        rule: react/forward-ref-uses-ref
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Attach the forwarded ref to a DOM element or component.
+      example: |
+        // Before
+        const Input = forwardRef((props, _ref) => <input {...props} />);
+        // After
+        const Input = forwardRef((props, ref) => <input ref={ref} {...props} />);
+
+  # Performance
+  - id: react-jsx-no-constructed-context-values
+    name: Memoize Context Values
+    description: |
+      Context values should be memoized to avoid unnecessary consumer re-renders.
+    rationale: |
+      Constructing objects or arrays inline as context value causes all consumers to
+      re-render every time the parent renders. React compares context values by
+      reference. Memoize the value so its reference stays stable.
+    severity: warning
+    tags:
+      - react
+      - performance
+      - hooks
+    detector:
+      capability: eslint
+      config:
+        rule: react/jsx-no-constructed-context-values
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Memoize the context value with useMemo so its reference stays stable across renders.
+      example: |
+        // bad
+        <Ctx.Provider value={{ user, setUser }}>
+        // good
+        const value = useMemo(() => ({ user, setUser }), [user, setUser]);
+        <Ctx.Provider value={value}>
+    tests:
+      - name: inline object context fires
+        should: fire
+        code: |
+          <Ctx.Provider value={{ user, setUser }}>
+      - name: memoized context passes
+        should: pass
+        code: |
+          const value = useMemo(() => ({ user, setUser }), [user, setUser]);
+          <Ctx.Provider value={value}>
+
+  - id: react-no-object-type-as-default-prop
+    name: Don't Use Object Literals as Default Props
+    description: |
+      Object and array literals as default props break memoization.
+    rationale: |
+      Object and array literals as default props create new references on every
+      render, breaking memoized child components. Memoized components detect a
+      reference change and re-render even though the logical value is the same.
+    severity: warning
+    tags:
+      - react
+      - performance
+      - props
+    detector:
+      capability: eslint
+      config:
+        rule: react/no-object-type-as-default-prop
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Define the default prop value outside the component or use a stable constant.
+      example: |
+        // bad
+        function List({ items = [] }) {}
+        // good
+        const EMPTY = [];
+        function List({ items = EMPTY }) {}
+    tests:
+      - name: array default prop fires
+        should: fire
+        code: |
+          function List({ items = [] }) {}
+      - name: stable constant default passes
+        should: pass
+        code: |
+          const EMPTY = [];
+          function List({ items = EMPTY }) {}
+
+  # Safety
+  - id: react-no-danger
+    name: Avoid Setting Inner HTML Directly
+    description: |
+      Setting inner HTML directly bypasses React's XSS protection.
+    rationale: |
+      Setting raw HTML bypasses React's automatic XSS protection because HTML
+      strings are not validated. This should be avoided or carefully reviewed with
+      sanitized, trusted content only. Prefer rendering plain text or JSX instead.
+    severity: warning
+    tags:
+      - react
+      - security
+    detector:
+      capability: eslint
+      config:
+        rule: react/no-danger
+        plugin: eslint-plugin-react
+    applies_to:
+      - "**/*.tsx"
+      - "**/*.jsx"
+    fix:
+      message: Avoid setting raw HTML. If required, document the sanitization step and use a reviewed helper.
+      example: |
+        // bad
+        <div innerHTML={rawHtml} />
+        // good
+        <div>{sanitizedText}</div>
+    tests:
+      - name: innerHTML prop fires
+        should: fire
+        code: |
+          <div innerHTML={rawHtml} />
+      - name: plain text passes
+        should: pass
+        code: |
+          <div>{sanitizedText}</div>

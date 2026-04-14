@@ -1,0 +1,827 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-resilience
+  name: Go Resilience
+  version: 0.1.0
+  description: >
+    Principal-level resilience and reliability rules for Go services.
+    Catches missing timeouts, unbounded concurrency, graceful shutdown
+    gaps, and retry anti-patterns that cause cascading failures in
+    distributed systems.
+  descriptions:
+    business: >
+      Your team invested in Go for its performance and reliability, so your
+      services can handle high traffic without breaking. This pack catches
+      mistakes that cause outages, cascading failures, and resource exhaustion
+      -- the kind of bugs that take down entire systems at 2 AM and cost
+      real money in lost transactions and customer trust.
+    developer: >
+      Go gives you goroutines and a great stdlib, but the concurrency and
+      networking APIs have sharp edges that bite in production. These rules
+      enforce timeout propagation, bounded concurrency, panic isolation,
+      and graceful shutdown patterns that prevent the cascading failures
+      you only discover under real load.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-resilience.yaml
+  tags:
+    language: go
+    category: resilience
+    architecture: [services, workers]
+
+rules:
+  # ── HTTP client timeouts ─────────────────────────────────────
+
+  - id: go-res-http-default-client
+    name: Do not use http.DefaultClient or top-level HTTP helpers
+    description: >
+      Flags usage of http.DefaultClient and the convenience functions
+      http.Get(), http.Post(), http.PostForm(), and http.Head(). These
+      all use a shared client with no timeout configured.
+    descriptions:
+      business: >
+        This code makes network calls with no time limit. Think of it like
+        placing a phone call with no hang-up mechanism -- if the other side
+        goes silent, your service waits forever. Under load, this stacks up
+        and takes down your entire application, causing a full outage.
+      developer: >
+        http.DefaultClient and the top-level helpers (http.Get, http.Post,
+        etc.) have a zero-value Timeout, meaning no timeout at all. A single
+        stalled upstream blocks the goroutine and its file descriptor
+        indefinitely. The correct pattern is always constructing an
+        &http.Client{Timeout: N} with an explicit deadline.
+    rationale: >
+      http.DefaultClient has no Timeout set (zero value = no timeout).
+      A single slow or unresponsive upstream server will block the calling
+      goroutine indefinitely. In a request-handling path, this leaks
+      goroutines and file descriptors until the process OOMs or hits
+      ulimits. In production incidents, this is the single most common
+      root cause of Go service cascading failures. Always construct an
+      &http.Client{Timeout: ...} with an explicit deadline, or better,
+      derive the timeout from the inbound request's context.
+    severity: error
+    tags: [http, timeout, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: http.DefaultClient
+          - pattern: http.Get(...)
+          - pattern: http.Post(...)
+          - pattern: http.PostForm(...)
+          - pattern: http.Head(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: "Create an explicit &http.Client{Timeout: N} instead of using the default client."
+      example: |
+        // Before — goroutine blocks forever if upstream stalls
+        resp, err := http.Get("https://api.example.com/data")
+
+        // After — explicit timeout bounds the blast radius
+        client := &http.Client{Timeout: 10 * time.Second}
+        resp, err := client.Get("https://api.example.com/data")
+    references:
+      - https://pkg.go.dev/net/http#Client
+      - https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
+      - https://medium.com/@nate510/don-t-use-go-s-default-http-client-4804cb19f779
+
+  - id: go-res-http-client-no-timeout
+    name: http.Client must have an explicit Timeout
+    description: >
+      Flags construction of &http.Client{} without the Timeout field set.
+      A zero-value Timeout means no timeout at all.
+    descriptions:
+      business: >
+        This code created a custom HTTP client but forgot to set a time
+        limit on requests. It is like building a custom delivery truck but
+        forgetting to install a fuel gauge -- it will run until it stalls
+        unexpectedly. Without this fix, a slow third-party API can silently
+        freeze your service.
+      developer: >
+        An &http.Client{} without Timeout set has the same zero-timeout
+        behavior as DefaultClient. Even if you attach per-request context
+        deadlines, the Client-level Timeout is your defense-in-depth safety
+        net for call sites that forget. Always set Timeout when constructing
+        a client.
+    rationale: >
+      Constructing a custom http.Client is the right first step, but
+      forgetting the Timeout field leaves you in the same position as
+      http.DefaultClient. The net/http documentation explicitly warns:
+      "A Client is not suitable for use by multiple goroutines unless
+      its Timeout field is set." Even with per-request context deadlines,
+      setting a Client-level Timeout provides a safety net for call sites
+      that forget to attach a context. This is defense in depth — the
+      Client timeout is your last line before a goroutine leak.
+    severity: error
+    tags: [http, timeout, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              &http.Client{...}
+          - pattern-not: |
+              &http.Client{..., Timeout: $T, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Set the Timeout field on your http.Client.
+      example: |
+        // Before — zero timeout, equivalent to DefaultClient
+        client := &http.Client{
+            Transport: customTransport,
+        }
+
+        // After — explicit 30s safety net
+        client := &http.Client{
+            Transport: customTransport,
+            Timeout:   30 * time.Second,
+        }
+    references:
+      - https://pkg.go.dev/net/http#Client
+      - https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
+
+  # ── HTTP server timeouts ─────────────────────────────────────
+
+  - id: go-res-server-no-timeouts
+    name: http.Server must set ReadTimeout and WriteTimeout
+    description: >
+      Flags construction of &http.Server{} without ReadTimeout or
+      WriteTimeout. A server without these timeouts is vulnerable to
+      slowloris attacks and resource exhaustion from slow clients.
+    descriptions:
+      business: >
+        This server has no protection against slow or malicious clients. An
+        attacker (or even a user on a bad connection) can hold server
+        resources open indefinitely, like someone blocking a checkout lane
+        forever. A handful of these connections can exhaust your server and
+        cause downtime for all customers.
+      developer: >
+        An http.Server without ReadTimeout and WriteTimeout is vulnerable to
+        slowloris and slow-read attacks. Each stalled connection holds a
+        goroutine, file descriptor, and memory buffers. The stdlib
+        intentionally has no defaults here -- set both timeouts explicitly
+        based on your application's needs.
+    rationale: >
+      Without ReadTimeout, a client can hold a connection open by sending
+      headers one byte at a time (slowloris). Without WriteTimeout, a
+      client that reads slowly (or stops reading) blocks the server
+      goroutine forever. In both cases, each stalled connection consumes
+      a goroutine (~4KB stack), a file descriptor, and memory buffers.
+      An attacker or misbehaving client can trivially exhaust all of
+      these. The Go standard library intentionally does not set defaults
+      here because the right values are application-specific — but zero
+      is never the right value for a production server.
+    severity: error
+    tags: [http, timeout, dos]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  &http.Server{...}
+              - pattern-not: |
+                  &http.Server{..., ReadTimeout: $T, ...}
+          - patterns:
+              - pattern: |
+                  &http.Server{...}
+              - pattern-not: |
+                  &http.Server{..., WriteTimeout: $T, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Set both ReadTimeout and WriteTimeout on your http.Server.
+      example: |
+        // Before — vulnerable to slowloris and slow-read attacks
+        srv := &http.Server{
+            Addr:    ":8080",
+            Handler: mux,
+        }
+
+        // After — bounded resource consumption
+        srv := &http.Server{
+            Addr:         ":8080",
+            Handler:      mux,
+            ReadTimeout:  5 * time.Second,
+            WriteTimeout: 10 * time.Second,
+            IdleTimeout:  120 * time.Second,
+        }
+    references:
+      - https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
+      - https://pkg.go.dev/net/http#Server
+      - https://ieftimov.com/posts/make-resilient-golang-net-http-servers-using-timeouts-deadlines-context-cancellation/
+
+  - id: go-res-listen-and-serve-bare
+    name: Do not use http.ListenAndServe directly
+    description: >
+      Flags calls to http.ListenAndServe(). This convenience function
+      creates an http.Server internally with no way to set timeouts,
+      configure TLS, or implement graceful shutdown.
+    descriptions:
+      business: >
+        This code starts a web server using a shortcut that prevents you
+        from configuring timeouts or clean shutdowns. Think of it like
+        opening a store with no way to lock the doors at closing time --
+        during deployments, active customer requests get killed mid-flight
+        instead of finishing gracefully.
+      developer: >
+        http.ListenAndServe creates an internal http.Server you cannot
+        access. You cannot set timeouts, cannot call Shutdown() for graceful
+        drain, and cannot configure TLS beyond defaults. Always construct an
+        explicit &http.Server{} and call its ListenAndServe method.
+    rationale: >
+      http.ListenAndServe is fine for examples and prototypes, but in
+      production it is a trap. You cannot set ReadTimeout, WriteTimeout,
+      or IdleTimeout. You cannot call Shutdown() for graceful drain because
+      you have no handle on the server object. You cannot configure
+      TLS parameters beyond the defaults. Every production Go service
+      should construct an explicit &http.Server{} and call its
+      ListenAndServe or ListenAndServeTLS method.
+    severity: warning
+    tags: [http, timeout, graceful-shutdown]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: http.ListenAndServe(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Create an explicit &http.Server{} with timeouts and call srv.ListenAndServe().
+      example: |
+        // Before — no timeouts, no graceful shutdown handle
+        log.Fatal(http.ListenAndServe(":8080", mux))
+
+        // After — full control over server lifecycle
+        srv := &http.Server{
+            Addr:         ":8080",
+            Handler:      mux,
+            ReadTimeout:  5 * time.Second,
+            WriteTimeout: 10 * time.Second,
+        }
+        log.Fatal(srv.ListenAndServe())
+    references:
+      - https://pkg.go.dev/net/http#ListenAndServe
+      - https://pkg.go.dev/net/http#Server.Shutdown
+      - https://go.dev/blog/context
+
+  # ── Concurrency safety ──────────────────────────────────────
+
+  - id: go-res-unbounded-goroutine-loop
+    name: Goroutines in loops must be bounded by a semaphore or worker pool
+    description: >
+      Flags goroutines started inside a for loop without a semaphore
+      channel send or semaphore.Acquire() call to limit concurrency.
+    descriptions:
+      business: >
+        This code launches an unlimited number of parallel tasks. Think of
+        it like hiring one new employee for every single item on a to-do
+        list -- with a million items, you run out of office space and
+        everyone stops working. Without a limit, a large input set crashes
+        the service or overwhelms downstream systems.
+      developer: >
+        Spawning a goroutine per loop iteration with no semaphore creates
+        unbounded concurrency. Each goroutine costs ~4KB stack plus whatever
+        it allocates. Processing 1M items this way means ~4GB of stacks
+        alone, plus thundering-herd effects on downstream services. Use a
+        semaphore channel or errgroup.SetLimit(N).
+    rationale: >
+      Launching an unbounded number of goroutines is a form of resource
+      exhaustion. Each goroutine costs ~4KB of stack memory and consumes
+      scheduler time. Processing a 1M-element slice with `go process(item)`
+      in a loop instantly creates 1M goroutines (~4GB of stack alone),
+      plus whatever resources each goroutine allocates. In practice this
+      causes OOM kills, massive GC pauses, and thundering-herd effects
+      on downstream services. Use a semaphore channel, a worker pool,
+      or errgroup.Group with SetLimit() to bound concurrency.
+    severity: warning
+    tags: [concurrency, resource-exhaustion]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              for ... {
+                ...
+                go $FUNC(...)
+                ...
+              }
+          - pattern-not-inside: |
+              for ... {
+                ...
+                $SEM.Acquire(...)
+                ...
+              }
+          - pattern-not-inside: |
+              for ... {
+                ...
+                $SEM <- ...
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add a semaphore channel or use errgroup.SetLimit() to bound goroutine creation.
+      example: |
+        // Before — unbounded goroutine creation
+        for _, item := range items {
+            go process(item)
+        }
+
+        // After — bounded with a semaphore channel
+        sem := make(chan struct{}, 10)
+        for _, item := range items {
+            sem <- struct{}{}
+            go func(it Item) {
+                defer func() { <-sem }()
+                process(it)
+            }(item)
+        }
+
+        // After — bounded with errgroup
+        g, ctx := errgroup.WithContext(ctx)
+        g.SetLimit(10)
+        for _, item := range items {
+            g.Go(func() error { return process(ctx, item) })
+        }
+    references:
+      - https://pkg.go.dev/golang.org/x/sync/errgroup
+      - https://pkg.go.dev/golang.org/x/sync/semaphore
+      - https://go.dev/blog/pipelines
+
+  - id: go-res-goroutine-no-recover
+    name: Anonymous goroutines must defer a recover()
+    description: >
+      Flags anonymous goroutines (go func() { ... }()) that do not
+      contain a deferred recover() call.
+    descriptions:
+      business: >
+        This code runs background work without a safety net. If anything
+        unexpected happens in that background task, it crashes the entire
+        application -- not just that one task. Think of it like a fuse box
+        with no circuit breakers: one short circuit takes down all the
+        power.
+      developer: >
+        A panic in any goroutine kills the entire process -- there is no way
+        to catch it from outside. Libraries you call may panic on nil
+        pointers or type assertions. A deferred recover() at the top of each
+        goroutine isolates the blast radius to that one unit of work and
+        lets you log, emit metrics, and keep serving.
+    rationale: >
+      In Go, a panic in any goroutine crashes the entire process — there
+      is no way to catch it from outside the goroutine. If you launch
+      goroutines to handle requests, process queue items, or run
+      background tasks, a single unexpected panic in any of them takes
+      down every other in-flight operation. Libraries you call may panic
+      on nil pointers, slice bounds, or type assertions. A deferred
+      recover() at the top of each goroutine isolates the blast radius
+      to that one unit of work and gives you a chance to log, emit
+      metrics, and continue serving.
+    severity: warning
+    tags: [concurrency, panic-safety]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              go func(...) { ... }(...)
+          - pattern-not-inside: |
+              go func(...) {
+                ...
+                defer func() { ... recover() ... }()
+                ...
+              }(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add a deferred recover() at the top of the goroutine function body.
+      example: |
+        // Before — panic crashes the whole process
+        go func() {
+            processBatch(items)
+        }()
+
+        // After — panic is contained and logged
+        go func() {
+            defer func() {
+                if r := recover(); r != nil {
+                    log.Printf("goroutine panicked: %v\n%s", r, debug.Stack())
+                }
+            }()
+            processBatch(items)
+        }()
+    references:
+      - https://go.dev/ref/spec#Handling_panics
+      - https://go.dev/blog/defer-panic-and-recover
+      - https://pkg.go.dev/runtime/debug#Stack
+
+  # ── Context hygiene ──────────────────────────────────────────
+
+  - id: go-res-context-todo-in-production
+    name: Replace context.TODO() with a real context in production code
+    description: >
+      Flags usage of context.TODO() outside of main() and Test functions.
+      context.TODO() is an explicit marker for code that has not yet
+      decided which context to use.
+    descriptions:
+      business: >
+        This code uses a placeholder that was never meant for production.
+        It is like putting a "TBD" on a shipping label -- the package goes
+        somewhere, but cancellations and timeouts will not propagate
+        correctly. Without a proper context, your service cannot shut down
+        cleanly or cancel wasted work when users disconnect.
+      developer: >
+        context.TODO() breaks the context propagation chain. It carries no
+        deadline, no cancellation signal, and no trace metadata. Downstream
+        RPCs and DB calls will ignore the caller's cancellation and the
+        server's shutdown signal. Replace with the request context or
+        context.WithTimeout(context.Background(), N).
+    rationale: >
+      context.TODO() breaks the entire context propagation chain. It
+      cannot carry deadlines, cancellation signals, or trace metadata
+      from the caller. In a service handling requests, using TODO() means
+      that downstream RPCs and database calls will not respect the
+      client's cancellation or the server's shutdown signal. This leads
+      to wasted work after client disconnects, leaked connections during
+      graceful shutdown, and broken distributed tracing. Replace with
+      the request context, a context derived from it, or at minimum
+      context.Background() with an explicit timeout via
+      context.WithTimeout().
+    severity: warning
+    tags: [context, timeout]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: context.TODO()
+          - pattern-not-inside: |
+              func main() { ... }
+          - pattern-not-inside: |
+              func Test$NAME(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Replace context.TODO() with the request context or context.Background() with a timeout.
+      example: |
+        // Before — breaks timeout propagation, invisible in traces
+        result, err := db.QueryContext(context.TODO(), query)
+
+        // After — propagates caller's deadline and cancellation
+        result, err := db.QueryContext(ctx, query)
+
+        // After — if no parent context exists, at least set a deadline
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        result, err := db.QueryContext(ctx, query)
+    references:
+      - https://pkg.go.dev/context#TODO
+      - https://go.dev/blog/context
+      - https://go.dev/blog/context-and-structs
+
+  # ── errgroup ─────────────────────────────────────────────────
+
+  - id: go-res-errgroup-no-limit
+    name: errgroup.Group should call SetLimit to bound concurrency
+    description: >
+      Flags errgroup.WithContext() usage where SetLimit() is not called
+      on the resulting group. Without a limit, every g.Go() call launches
+      a new goroutine immediately.
+    descriptions:
+      business: >
+        This code uses a tool designed for parallel work but forgot to set
+        a limit on how much work runs at once. It is like opening all the
+        floodgates on a dam simultaneously -- without a controlled flow,
+        downstream systems get overwhelmed and your service runs out of
+        memory or crashes.
+      developer: >
+        errgroup.Group without SetLimit() launches one goroutine per g.Go()
+        call with no backpressure -- functionally identical to bare
+        goroutines in a loop. Call g.SetLimit(N) immediately after creating
+        the group. Choose N based on downstream capacity, not input size.
+    rationale: >
+      errgroup.Group without SetLimit() is functionally identical to
+      spawning bare goroutines in a loop — there is no backpressure.
+      When processing a large collection, this creates one goroutine per
+      item, which can exhaust memory and overwhelm downstream services.
+      The errgroup.SetLimit() method was added in x/sync v0.1.0
+      specifically to solve this. Call g.SetLimit(N) immediately after
+      creating the group to bound the number of concurrent goroutines.
+      Choose N based on downstream service capacity, not input size.
+    severity: warning
+    tags: [concurrency, resource-exhaustion]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $G, $CTX := errgroup.WithContext(...)
+          - pattern-not-inside: |
+              $G, $CTX := errgroup.WithContext(...)
+              ...
+              $G.SetLimit(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Call g.SetLimit(N) after creating the errgroup to bound concurrency.
+      example: |
+        // Before — unbounded concurrency
+        g, ctx := errgroup.WithContext(ctx)
+        for _, item := range items {
+            g.Go(func() error { return process(ctx, item) })
+        }
+
+        // After — bounded to 10 concurrent goroutines
+        g, ctx := errgroup.WithContext(ctx)
+        g.SetLimit(10)
+        for _, item := range items {
+            g.Go(func() error { return process(ctx, item) })
+        }
+    references:
+      - https://pkg.go.dev/golang.org/x/sync/errgroup#Group.SetLimit
+      - https://pkg.go.dev/golang.org/x/sync/errgroup
+
+  # ── Select and channel safety ────────────────────────────────
+
+  - id: go-res-select-no-timeout
+    name: Select statements should include a timeout or cancellation case
+    description: >
+      Flags select statements that do not include a case for context
+      cancellation (ctx.Done()) or a time.After timeout. If no case is
+      ready, the goroutine blocks indefinitely.
+    descriptions:
+      business: >
+        This code waits for a message with no backup plan if the message
+        never arrives. Think of it like an employee who waits at the
+        mailbox forever if a letter is late -- they never come back to do
+        other work. Over time, these stuck workers pile up and your service
+        slowly runs out of memory until it crashes.
+      developer: >
+        A select without a ctx.Done() or time.After case is a latent
+        goroutine leak. If the expected channel never receives (producer
+        crash, network partition, logic bug), the goroutine blocks forever.
+        Always include a cancellation or timeout case to bound the wait.
+    rationale: >
+      A select without a timeout or cancellation case is a latent
+      goroutine leak. If the expected channel never receives a value
+      (producer crashes, network partition, logic error), the goroutine
+      blocks forever. Over time, leaked goroutines accumulate memory,
+      file descriptors, and other resources. In production, this manifests
+      as a slow memory leak that eventually OOMs the process, often days
+      after deployment, making root cause analysis difficult. Always
+      include a case <-ctx.Done() to respect caller cancellation, or a
+      case <-time.After(N) as a hard deadline.
+    severity: info
+    tags: [concurrency, deadlock]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              select {
+                case ...:
+                  ...
+              }
+          - pattern-not-inside: |
+              select {
+                ...
+                case <-$CTX.Done():
+                  ...
+              }
+          - pattern-not-inside: |
+              select {
+                ...
+                case <-time.After(...):
+                  ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add a case for ctx.Done() or time.After() to prevent indefinite blocking.
+      example: |
+        // Before — blocks forever if ch never receives
+        select {
+        case msg := <-ch:
+            handle(msg)
+        }
+
+        // After — respects context cancellation
+        select {
+        case msg := <-ch:
+            handle(msg)
+        case <-ctx.Done():
+            return ctx.Err()
+        }
+
+        // After — hard timeout as safety net
+        select {
+        case msg := <-ch:
+            handle(msg)
+        case <-time.After(30 * time.Second):
+            return errors.New("timed out waiting for message")
+        }
+    references:
+      - https://go.dev/ref/spec#Select_statements
+      - https://go.dev/blog/pipelines
+      - https://go.dev/blog/context
+
+  # ── Graceful shutdown ────────────────────────────────────────
+
+  - id: go-res-signal-notify-unbuffered
+    name: signal.Notify channel must be buffered
+    description: >
+      Flags signal.Notify() called with a channel created by
+      make(chan os.Signal) (unbuffered). The signal package requires a
+      buffered channel; otherwise signals may be dropped.
+    descriptions:
+      business: >
+        This code could miss the shutdown signal from your orchestrator
+        (like Kubernetes). Think of it like a fire alarm that only sounds
+        if someone is standing next to it -- if nobody is listening at that
+        exact moment, the signal is lost and your service gets force-killed,
+        dropping in-flight customer requests.
+      developer: >
+        signal.Notify will not block sending to the channel. If the channel
+        is unbuffered and nobody is receiving when the signal arrives, it is
+        silently dropped. The process ignores SIGTERM and gets SIGKILL'd
+        after the grace period. Always use make(chan os.Signal, 1).
+    rationale: >
+      The signal package documentation explicitly states: "Package signal
+      will not block sending to c." If the channel is unbuffered and the
+      receiver is not ready (e.g., it is between iterations of a select
+      loop), the signal is silently dropped. This makes graceful shutdown
+      unreliable — the process ignores SIGTERM and gets SIGKILL'd by the
+      orchestrator after the grace period, killing in-flight requests.
+      Always use make(chan os.Signal, 1) to ensure at least one signal
+      can be buffered.
+    severity: error
+    tags: [graceful-shutdown, signals]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              $CH := make(chan os.Signal)
+              ...
+              signal.Notify($CH, ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use make(chan os.Signal, 1) to create a buffered signal channel.
+      example: |
+        // Before — signal is dropped if receiver is not ready
+        sigCh := make(chan os.Signal)
+        signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+        // After — buffered channel ensures signal is not lost
+        sigCh := make(chan os.Signal, 1)
+        signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+    references:
+      - https://pkg.go.dev/os/signal#Notify
+      - https://go.dev/blog/context-and-structs
+
+  # ── WaitGroup correctness ───────────────────────────────────
+
+  - id: go-res-waitgroup-add-in-goroutine
+    name: WaitGroup.Add must be called before launching the goroutine
+    description: >
+      Flags WaitGroup.Add() called inside a goroutine body instead of
+      before the go statement. This is a race condition.
+    descriptions:
+      business: >
+        This code has a race condition that causes unpredictable behavior.
+        Think of it like counting runners after the starting gun -- some
+        runners finish before you count them, so you declare the race over
+        while people are still running. This leads to intermittent bugs
+        that pass testing but cause data corruption or crashes in production.
+      developer: >
+        wg.Add(1) inside the goroutine races with wg.Wait() in the parent.
+        If Wait() runs before the goroutine's Add(1), it sees a zero counter
+        and returns immediately while goroutines are still in flight. Move
+        wg.Add(1) before the go statement so the counter is incremented
+        before Wait() can observe it.
+    rationale: >
+      When wg.Add(1) is called inside the goroutine, there is a race
+      between the goroutine executing Add(1) and the parent calling
+      wg.Wait(). If Wait() runs first, it sees a zero counter and
+      returns immediately, even though goroutines are still running
+      (or haven't started yet). This is a data race that causes
+      intermittent failures: tests pass locally but flake in CI, or
+      the program exits before background work completes. The fix is
+      simple — call wg.Add(1) before the go statement so the counter
+      is incremented before Wait() can observe it.
+    severity: error
+    tags: [concurrency, race-condition]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          go func(...) {
+            ...
+            $WG.Add(...)
+            ...
+          }(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move wg.Add(1) before the go statement.
+      example: |
+        // Before — race between Add and Wait
+        go func() {
+            wg.Add(1)
+            defer wg.Done()
+            process(item)
+        }()
+
+        // After — Add happens-before the goroutine starts
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            process(item)
+        }()
+    references:
+      - https://pkg.go.dev/sync#WaitGroup
+      - https://go.dev/doc/articles/race_detector
+
+  # ── Mutex correctness ───────────────────────────────────────
+
+  - id: go-res-mutex-copy
+    name: Do not use a value receiver on methods that lock a mutex
+    description: >
+      Flags methods with a value (non-pointer) receiver that call Lock()
+      on a mutex field. The receiver is copied, so the lock protects
+      nothing.
+    descriptions:
+      business: >
+        This code has a lock that does not actually protect anything. Think
+        of it like giving every employee their own copy of the office key
+        instead of sharing one -- everyone thinks they have exclusive access,
+        but nobody actually does. This causes data corruption under
+        concurrent usage that is extremely difficult to reproduce and debug.
+      developer: >
+        A value receiver copies the entire struct, including the mutex. The
+        Lock() call locks the copy, not the original. Two concurrent callers
+        each get their own mutex and both "acquire the lock" simultaneously,
+        causing data races. Change the receiver to a pointer receiver
+        (*Type).
+    rationale: >
+      When a method has a value receiver, Go copies the entire struct
+      (including the mutex) into the method frame. The Lock() call locks
+      the copy, not the original. Two concurrent callers each get their
+      own mutex copy and both "acquire the lock" simultaneously, leading
+      to data races on the shared fields they think they are protecting.
+      This is particularly insidious because the code looks correct —
+      the bug is in the receiver type, not the locking logic. The go vet
+      copylocks analyzer catches some cases, but this pattern specifically
+      targets methods that actively use the mutex, which are always wrong.
+    severity: error
+    tags: [concurrency, mutex, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func ($R $TYPE) $METHOD(...) $RET {
+                ...
+                $R.$MU.Lock()
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $TYPE
+              regex: "^[^*]"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Change the receiver to a pointer receiver (*Type) so the mutex is not copied.
+      example: |
+        // Before — mutex is copied, lock is useless
+        func (c Cache) Set(key, value string) {
+            c.mu.Lock()
+            defer c.mu.Unlock()
+            c.data[key] = value
+        }
+
+        // After — pointer receiver, mutex protects the real data
+        func (c *Cache) Set(key, value string) {
+            c.mu.Lock()
+            defer c.mu.Unlock()
+            c.data[key] = value
+        }
+    references:
+      - https://pkg.go.dev/sync#Mutex
+      - https://go.dev/doc/articles/race_detector
+      - https://go.dev/wiki/CodeReviewComments#receiver-type

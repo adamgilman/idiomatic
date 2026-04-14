@@ -1,0 +1,960 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: terraform-aws
+  name: Terraform AWS
+  version: 0.1.0
+  description: >
+    Principal-level Terraform rules for AWS infrastructure. Catches
+    security misconfigurations, missing encryption, overly permissive
+    access policies, and operational gaps that cause security incidents
+    and compliance failures.
+  descriptions:
+    business: >
+      Your Terraform configuration determines whether your AWS
+      infrastructure stays secure, stays affordable, and keeps your data
+      safe. This pack catches the misconfigurations that lead to security
+      breaches (databases exposed to the internet, S3 buckets publicly
+      readable), surprise AWS bills (CloudWatch logs stored forever), and
+      permanent data loss (databases without backups, resources without
+      deletion protection). These are the mistakes behind the headlines.
+    developer: >
+      These rules catch the Terraform misconfigurations that pass code
+      review because they "work in dev" but cause incidents in production
+      -- security groups open to 0.0.0.0/0, S3 buckets without
+      encryption, RDS instances with publicly_accessible = true, IAM
+      policies with Action = "*", and stateful resources missing
+      lifecycle.prevent_destroy. If it would fail a SOC 2 audit or cause
+      a page, there is a rule for it.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/terraform-aws.yaml
+  tags:
+    vendor: terraform
+    category: infrastructure
+    architecture: [services, workers]
+
+rules:
+  # ── Network security ───────────────────────────────────────────
+
+  - id: tf-aws-sg-ingress-all
+    name: Security group allows ingress from 0.0.0.0/0
+    description: >
+      Flags aws_security_group_rule resources that allow inbound traffic
+      from 0.0.0.0/0. This makes the associated resource publicly
+      accessible from the entire internet.
+    descriptions:
+      business: >
+        This security group allows traffic from every IP address on the
+        internet to reach your resource. Think of it like removing the
+        front door of your office and putting up a sign that says "come
+        on in." This is the single most common misconfiguration behind
+        AWS data breaches, including Capital One's 2019 breach. Every
+        compliance audit will flag this as a critical finding.
+      developer: >
+        This security group rule has cidr_blocks = ["0.0.0.0/0"] on
+        ingress, making the associated resource reachable from the entire
+        internet. For databases, caches, and internal services, this is
+        never intentional. Use specific CIDR ranges, reference other
+        security groups by ID, or use AWS-managed prefix lists. Even for
+        public-facing ALBs, prefer a known CIDR or prefix list over the
+        entire IPv4 space.
+    rationale: >
+      A security group rule with cidr_blocks = ["0.0.0.0/0"] on ingress
+      is the single most common misconfiguration behind AWS breaches.
+      It means every IP on the internet can reach the port. For
+      databases, caches, and internal services, this is never
+      intentional. Even for public-facing load balancers, the security
+      group should reference a known CIDR or prefix list rather than
+      the entire IPv4 space. Capital One's 2019 breach started with an
+      overly permissive security group on a WAF. Every security audit
+      and compliance framework (SOC 2, PCI-DSS, CIS AWS Benchmark)
+      flags unrestricted ingress as a critical finding. Use specific
+      CIDR ranges, reference other security groups by ID, or use
+      AWS-managed prefix lists for known services.
+    severity: error
+    tags: [terraform, aws, security, networking]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern: |
+          resource "aws_security_group_rule" "..." {
+            ...
+            type = "ingress"
+            ...
+            cidr_blocks = ["0.0.0.0/0"]
+            ...
+          }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Restrict cidr_blocks to specific IP ranges or reference a security group ID.
+      example: |
+        # Before — open to the entire internet
+        resource "aws_security_group_rule" "allow_all" {
+          type              = "ingress"
+          from_port         = 443
+          to_port           = 443
+          protocol          = "tcp"
+          cidr_blocks       = ["0.0.0.0/0"]
+          security_group_id = aws_security_group.web.id
+        }
+
+        # After — restricted to known CIDR
+        resource "aws_security_group_rule" "allow_office" {
+          type              = "ingress"
+          from_port         = 443
+          to_port           = 443
+          protocol          = "tcp"
+          cidr_blocks       = ["10.0.0.0/8"]
+          security_group_id = aws_security_group.web.id
+        }
+    references:
+      - https://docs.aws.amazon.com/vpc/latest/userguide/security-group-rules.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group_rule
+      - https://d1.awsstatic.com/whitepapers/compliance/AWS_CIS_Foundations_Benchmark.pdf
+
+  # ── S3 security ────────────────────────────────────────────────
+
+  - id: tf-aws-s3-no-encryption
+    name: S3 bucket without server-side encryption configuration
+    description: >
+      Flags aws_s3_bucket resources that do not have a corresponding
+      aws_s3_bucket_server_side_encryption_configuration resource or
+      inline server_side_encryption_configuration block. Data at rest
+      is stored unencrypted.
+    descriptions:
+      business: >
+        This S3 bucket stores data without encryption. If an attacker
+        gains access to the bucket through a policy mistake or leaked
+        credentials, all data is immediately readable in plain text.
+        Think of it like storing confidential documents in an unlocked
+        filing cabinet. Encryption is free on AWS and has zero performance
+        impact -- there is no reason to skip it. Every compliance
+        framework requires it.
+      developer: >
+        This aws_s3_bucket has no server_side_encryption_configuration.
+        While AWS now encrypts new buckets with SSE-S3 by default,
+        Terraform does not reflect this unless you explicitly configure
+        it. Without explicit config, drift detection cannot verify the
+        bucket remains encrypted after manual console changes. Add an
+        aws_s3_bucket_server_side_encryption_configuration resource with
+        SSE-S3 (free) or SSE-KMS (for compliance requiring CMKs).
+    rationale: >
+      Unencrypted S3 buckets store objects as plaintext on disk. If an
+      attacker gains access to the underlying storage (through a
+      misconfigured bucket policy, leaked credentials, or insider
+      threat), all data is immediately readable. AWS SSE-S3 is free
+      and adds zero performance overhead. There is no reason to skip
+      it. Since January 2023 AWS encrypts new buckets with SSE-S3 by
+      default, but Terraform does not reflect this unless you
+      explicitly configure it. Explicit encryption configuration also
+      lets you enforce SSE-KMS with customer-managed keys when
+      compliance requires it. CIS AWS Benchmark 2.1.1 requires
+      server-side encryption on all S3 buckets. Without explicit
+      Terraform configuration, drift detection cannot verify the
+      bucket remains encrypted after manual console changes.
+    severity: error
+    tags: [terraform, aws, security, encryption, s3]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "aws_s3_bucket" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "aws_s3_bucket" "..." {
+                ...
+                server_side_encryption_configuration {
+                  ...
+                }
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add an aws_s3_bucket_server_side_encryption_configuration resource or inline block.
+      example: |
+        # Before — no encryption configured
+        resource "aws_s3_bucket" "data" {
+          bucket = "my-data-bucket"
+        }
+
+        # After — SSE-S3 encryption
+        resource "aws_s3_bucket" "data" {
+          bucket = "my-data-bucket"
+        }
+
+        resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
+          bucket = aws_s3_bucket.data.id
+
+          rule {
+            apply_server_side_encryption_by_default {
+              sse_algorithm = "aws:kms"
+            }
+            bucket_key_enabled = true
+          }
+        }
+    references:
+      - https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucket-encryption.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_server_side_encryption_configuration
+      - https://d1.awsstatic.com/whitepapers/compliance/AWS_CIS_Foundations_Benchmark.pdf
+
+  - id: tf-aws-s3-no-versioning
+    name: S3 bucket without versioning enabled
+    description: >
+      Flags aws_s3_bucket resources that do not have a corresponding
+      aws_s3_bucket_versioning resource with status = "Enabled".
+      Without versioning, accidental deletes and overwrites are
+      permanent and unrecoverable.
+    descriptions:
+      business: >
+        Without versioning, if someone accidentally deletes or overwrites
+        a file in this S3 bucket, the data is gone forever with no way
+        to recover it. Think of it like a filing system with no recycle
+        bin and no backup copies. A single bad script, misconfigured
+        lifecycle rule, or compromised credential can permanently destroy
+        business-critical data. Versioning costs almost nothing compared
+        to the cost of losing production data.
+      developer: >
+        This aws_s3_bucket has no corresponding aws_s3_bucket_versioning
+        resource. Without versioning, a single DeleteObject call --
+        from a runaway script, misconfigured lifecycle rule, or
+        compromised credential -- permanently destroys the object. There
+        is no undo. Enable versioning so every overwrite and delete
+        creates a recoverable version. Combine with lifecycle rules to
+        expire old versions after a retention period to control costs.
+    rationale: >
+      S3 versioning is your last line of defense against data loss.
+      Without it, a single DeleteObject call — from a misconfigured
+      lifecycle rule, a runaway script, or a compromised credential —
+      permanently destroys the object. There is no recycle bin and no
+      undo. With versioning enabled, every overwrite and delete creates
+      a new version, and deleted objects get a delete marker that can
+      be removed to restore the data. Versioning is also a prerequisite
+      for S3 Cross-Region Replication and S3 Object Lock (immutable
+      backups). The cost of storing extra versions is negligible
+      compared to the cost of losing production data. Combine with
+      lifecycle rules to expire old versions after a retention period.
+    severity: warning
+    tags: [terraform, aws, reliability, s3]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "aws_s3_bucket" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "aws_s3_bucket" "..." {
+                ...
+                versioning {
+                  ...
+                }
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add an aws_s3_bucket_versioning resource with status = "Enabled".
+      example: |
+        # Before — no versioning
+        resource "aws_s3_bucket" "data" {
+          bucket = "my-data-bucket"
+        }
+
+        # After — versioning enabled
+        resource "aws_s3_bucket" "data" {
+          bucket = "my-data-bucket"
+        }
+
+        resource "aws_s3_bucket_versioning" "data" {
+          bucket = aws_s3_bucket.data.id
+
+          versioning_configuration {
+            status = "Enabled"
+          }
+        }
+    references:
+      - https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_versioning
+
+  - id: tf-aws-s3-public-acl
+    name: S3 bucket with public ACL
+    description: >
+      Flags aws_s3_bucket resources that set acl to "public-read" or
+      "public-read-write". Public S3 buckets are the most common
+      source of AWS data breaches.
+    descriptions:
+      business: >
+        This S3 bucket is configured so that anyone on the internet can
+        download its contents. If it contains customer data, internal
+        documents, or application data, this is a data breach in waiting.
+        Public S3 buckets have caused hundreds of high-profile breaches
+        (Twitch, Verizon, the U.S. Department of Defense). A
+        public-read-write ACL additionally lets anyone upload or overwrite
+        your files.
+      developer: >
+        This aws_s3_bucket has acl set to public-read or
+        public-read-write. Public-read makes every object downloadable by
+        anyone with the URL. Public-read-write additionally lets anyone
+        upload or overwrite objects. Use
+        aws_s3_bucket_public_access_block to enforce private access.
+        For public content delivery, serve through CloudFront with an
+        Origin Access Identity or Origin Access Control instead of
+        making the bucket itself public.
+    rationale: >
+      A public-read ACL makes every object in the bucket downloadable
+      by anyone with the URL. A public-read-write ACL additionally
+      lets anyone upload or overwrite objects — turning your bucket
+      into an attacker-controlled file share. Hundreds of data breaches
+      (Twitch, Verizon, U.S. Department of Defense) have been caused
+      by public S3 buckets. AWS now blocks public access by default on
+      new accounts, but Terraform can override those guardrails if you
+      set a public ACL explicitly. Use aws_s3_bucket_public_access_block
+      to enforce private access and serve public content through
+      CloudFront with an Origin Access Identity instead.
+    severity: error
+    tags: [terraform, aws, security, s3]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - pattern: |
+              resource "aws_s3_bucket" "..." {
+                ...
+                acl = "public-read"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket" "..." {
+                ...
+                acl = "public-read-write"
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Remove the public ACL. Use CloudFront with OAI/OAC for public content delivery.
+      example: |
+        # Before — publicly readable bucket
+        resource "aws_s3_bucket" "assets" {
+          bucket = "my-public-assets"
+          acl    = "public-read"
+        }
+
+        # After — private bucket with CloudFront
+        resource "aws_s3_bucket" "assets" {
+          bucket = "my-public-assets"
+        }
+
+        resource "aws_s3_bucket_public_access_block" "assets" {
+          bucket = aws_s3_bucket.assets.id
+
+          block_public_acls       = true
+          block_public_policy     = true
+          ignore_public_acls      = true
+          restrict_public_buckets = true
+        }
+    references:
+      - https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_public_access_block
+      - https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
+
+  # ── RDS security & reliability ─────────────────────────────────
+
+  - id: tf-aws-rds-no-backup
+    name: RDS instance with backup retention disabled
+    description: >
+      Flags aws_db_instance resources with backup_retention_period set
+      to 0. Without automated backups, point-in-time recovery is
+      impossible and data loss from accidental deletion, corruption,
+      or ransomware is permanent.
+    descriptions:
+      business: >
+        This database has automated backups disabled, meaning there is no
+        safety net for data loss. If a developer runs a bad migration, an
+        application bug corrupts data, or credentials are compromised,
+        the data is gone permanently. Think of it like running a business
+        without insurance -- everything is fine until it isn't, and then
+        the damage is catastrophic and irreversible. RDS backups are free
+        up to the size of your database.
+      developer: >
+        This aws_db_instance has backup_retention_period = 0, which
+        disables automated backups entirely. No daily snapshots, no
+        point-in-time recovery (PITR). A destructive migration, data
+        corruption, or credential compromise results in permanent data
+        loss. Set backup_retention_period to at least 7 (days) for
+        standard workloads or 35 (the maximum) for regulated data.
+        Backups are free up to the provisioned storage size.
+    rationale: >
+      Setting backup_retention_period = 0 disables automated backups
+      entirely. This means no automated daily snapshots and no
+      point-in-time recovery (PITR). If a developer runs a destructive
+      migration, an application bug corrupts data, or credentials are
+      compromised and an attacker drops tables, the data is gone
+      forever. RDS automated backups are free up to the size of the
+      provisioned storage and happen during a configurable maintenance
+      window with minimal performance impact. The default retention is
+      7 days, which is sufficient for most workloads. For regulated
+      environments, set it to 35 days (the maximum). There is no
+      legitimate reason to set this to 0 in any environment that
+      contains real data.
+    severity: error
+    tags: [terraform, aws, reliability, rds, backup]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern: |
+          resource "aws_db_instance" "..." {
+            ...
+            backup_retention_period = 0
+            ...
+          }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Set backup_retention_period to at least 7 (days). Use 35 for regulated data.
+      example: |
+        # Before — no backups
+        resource "aws_db_instance" "main" {
+          engine                  = "postgres"
+          instance_class          = "db.t3.medium"
+          backup_retention_period = 0
+        }
+
+        # After — 14-day retention with PITR
+        resource "aws_db_instance" "main" {
+          engine                  = "postgres"
+          instance_class          = "db.t3.medium"
+          backup_retention_period = 14
+          backup_window           = "03:00-04:00"
+        }
+    references:
+      - https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance#backup_retention_period
+
+  - id: tf-aws-rds-public
+    name: RDS instance with publicly_accessible = true
+    description: >
+      Flags aws_db_instance resources with publicly_accessible set to
+      true. The database will receive a public IP and be reachable
+      from the internet if the security group allows it.
+    descriptions:
+      business: >
+        This database is configured to be directly reachable from the
+        internet. If combined with a weak password or a security group
+        misconfiguration, anyone in the world can connect to your
+        database. Think of it like putting your filing cabinet on the
+        sidewalk with a combination lock -- one weak link and everything
+        is exposed. Nearly every high-profile database breach involved a
+        publicly reachable endpoint combined with weak credentials.
+      developer: >
+        This aws_db_instance has publicly_accessible = true, which
+        assigns a public DNS name and IP address to the RDS instance.
+        Even if the security group currently restricts access, a single
+        rule change exposes the database to the internet. Place the
+        instance in a private subnet with no public route, accessible
+        only through a bastion host, VPN, or application layer. CIS AWS
+        Benchmark 4.3 explicitly requires this.
+    rationale: >
+      publicly_accessible = true assigns a public DNS name and IP
+      address to the RDS instance, making it routable from the
+      internet. Even if the security group currently restricts access,
+      a single misconfigured rule change (see tf-aws-sg-ingress-all)
+      exposes the database directly. This is defense-in-depth
+      violation: the database should be in a private subnet with no
+      public route, accessible only through a bastion host, VPN, or
+      application layer. The CIS AWS Benchmark (4.3) explicitly
+      requires RDS instances to not be publicly accessible. Nearly
+      every high-profile database breach involved a publicly reachable
+      database endpoint combined with weak or leaked credentials.
+    severity: error
+    tags: [terraform, aws, security, rds, networking]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern: |
+          resource "aws_db_instance" "..." {
+            ...
+            publicly_accessible = true
+            ...
+          }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Set publicly_accessible = false. Place the RDS instance in a private subnet.
+      example: |
+        # Before — database reachable from the internet
+        resource "aws_db_instance" "main" {
+          engine              = "postgres"
+          instance_class      = "db.t3.medium"
+          publicly_accessible = true
+          db_subnet_group_name = aws_db_subnet_group.public.name
+        }
+
+        # After — database in private subnet only
+        resource "aws_db_instance" "main" {
+          engine              = "postgres"
+          instance_class      = "db.t3.medium"
+          publicly_accessible = false
+          db_subnet_group_name = aws_db_subnet_group.private.name
+        }
+    references:
+      - https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance#publicly_accessible
+      - https://d1.awsstatic.com/whitepapers/compliance/AWS_CIS_Foundations_Benchmark.pdf
+
+  # ── Governance ─────────────────────────────────────────────────
+
+  - id: tf-aws-no-tags
+    name: AWS resource without tags block
+    description: >
+      Flags common AWS resource types that do not include a tags block.
+      Untagged resources are invisible to cost allocation, ownership
+      tracking, and automated governance policies.
+    descriptions:
+      business: >
+        Without tags, AWS resources become invisible to cost tracking and
+        ownership. You cannot answer basic questions like "which team is
+        paying for this?" or "is it safe to delete?" Think of it like
+        items in a warehouse with no labels -- you end up paying to store
+        things nobody remembers ordering, and nobody knows what is safe
+        to discard. Untagged resources are the primary driver of surprise
+        AWS bills and orphaned infrastructure.
+      developer: >
+        This AWS resource has no tags block. Tags are the foundation of
+        AWS governance -- Cost Explorer, Resource Groups, IAM tag-based
+        access control, and automated cleanup tools all depend on them.
+        At minimum, add team, environment, and service tags. Use
+        default_tags in the AWS provider for baseline tags and augment
+        per-resource as needed. Retroactively tagging hundreds of
+        resources is expensive and error-prone.
+    rationale: >
+      Tags are the foundation of AWS governance. Without tags, you
+      cannot answer basic operational questions: who owns this
+      resource, which team's budget pays for it, what environment is
+      it in, is it safe to delete. AWS Cost Explorer, Resource Groups,
+      IAM tag-based access control, and automated cleanup tools all
+      depend on tags. Once you have hundreds of untagged resources, the
+      cost to retroactively tag them is enormous and error-prone. The
+      fix is simple: mandate tags at creation time in Terraform. At
+      minimum, every resource should have team, environment, and
+      service tags. Use default_tags in the AWS provider to set
+      baseline tags, then augment per-resource as needed.
+    severity: warning
+    tags: [terraform, aws, governance, cost-management]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  resource "aws_instance" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_instance" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_s3_bucket" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_s3_bucket" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_db_instance" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_db_instance" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_lambda_function" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_lambda_function" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_ecs_service" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_ecs_service" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_sqs_queue" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_sqs_queue" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_sns_topic" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_sns_topic" "..." {
+                    ...
+                    tags = ...
+                    ...
+                  }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add a tags block with at least team, environment, and service tags.
+      example: |
+        # Before — no tags
+        resource "aws_instance" "web" {
+          ami           = "ami-0c55b159cbfafe1f0"
+          instance_type = "t3.micro"
+        }
+
+        # After — properly tagged
+        resource "aws_instance" "web" {
+          ami           = "ami-0c55b159cbfafe1f0"
+          instance_type = "t3.micro"
+
+          tags = {
+            Name        = "web-server"
+            Environment = "production"
+            Team        = "platform"
+            Service     = "api"
+            ManagedBy   = "terraform"
+          }
+        }
+    references:
+      - https://docs.aws.amazon.com/tag-editor/latest/userguide/tagging.html
+      - https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs#default_tags
+
+  # ── IAM security ───────────────────────────────────────────────
+
+  - id: tf-aws-iam-star-action
+    name: IAM policy with Action = "*"
+    description: >
+      Flags aws_iam_policy_document data sources and
+      aws_iam_policy resources that grant Action = "*". This gives
+      the principal full administrative access to all AWS services.
+    descriptions:
+      business: >
+        This IAM policy grants unrestricted access to every AWS service
+        and every API action in your account. Think of it like giving
+        someone the master key to every office, vault, and server room in
+        your company. If these credentials are compromised, an attacker
+        can exfiltrate all data, spin up expensive resources, delete
+        everything including audit logs, and create new admin accounts.
+        This is the highest-severity IAM finding in any security audit.
+      developer: >
+        This IAM policy has actions = ["*"], granting unrestricted access
+        to every API call in every AWS service. A compromised credential
+        with this policy can do anything -- create admin users, exfiltrate
+        data, spin up crypto miners, and delete CloudTrail logs. Use
+        specific service actions (s3:GetObject, ec2:Describe*) scoped to
+        specific resource ARNs. AWS Access Analyzer can help identify the
+        minimum permissions needed.
+    rationale: >
+      Action = "*" is the IAM equivalent of giving someone the root
+      password. It grants unrestricted access to every API call in
+      every AWS service — EC2, S3, IAM, Organizations, everything.
+      A compromised credential with this policy can create new admin
+      users, exfiltrate all data, spin up cryptocurrency miners, and
+      delete all resources including CloudTrail logs to cover tracks.
+      The principle of least privilege is the most fundamental IAM
+      concept: grant only the permissions required for the specific
+      task. Use specific service actions (s3:GetObject, ec2:Describe*)
+      and restrict Resource to specific ARNs. AWS Access Analyzer can
+      help identify the minimum permissions needed. CIS AWS Benchmark
+      1.16 explicitly prohibits full administrative privileges.
+    severity: error
+    tags: [terraform, aws, security, iam]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - pattern: |
+              statement {
+                ...
+                actions = ["*"]
+                ...
+              }
+          - pattern: |
+              resource "aws_iam_policy" "..." {
+                ...
+                policy = ...
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Replace Action "*" with specific service actions following least-privilege.
+      example: |
+        # Before — full admin access
+        data "aws_iam_policy_document" "admin" {
+          statement {
+            effect    = "Allow"
+            actions   = ["*"]
+            resources = ["*"]
+          }
+        }
+
+        # After — scoped to specific actions and resources
+        data "aws_iam_policy_document" "app" {
+          statement {
+            effect = "Allow"
+            actions = [
+              "s3:GetObject",
+              "s3:PutObject",
+            ]
+            resources = [
+              "${aws_s3_bucket.data.arn}/*",
+            ]
+          }
+
+          statement {
+            effect = "Allow"
+            actions = [
+              "sqs:SendMessage",
+              "sqs:ReceiveMessage",
+              "sqs:DeleteMessage",
+            ]
+            resources = [
+              aws_sqs_queue.tasks.arn,
+            ]
+          }
+        }
+    references:
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#grant-least-privilege
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html
+      - https://d1.awsstatic.com/whitepapers/compliance/AWS_CIS_Foundations_Benchmark.pdf
+
+  # ── Lifecycle & data protection ────────────────────────────────
+
+  - id: tf-aws-no-lifecycle-prevent-destroy
+    name: Stateful resource without lifecycle.prevent_destroy
+    description: >
+      Flags stateful AWS resources (RDS instances, DynamoDB tables, S3
+      buckets) that do not set lifecycle.prevent_destroy = true. A
+      terraform destroy or resource rename will permanently delete the
+      resource and all its data without confirmation.
+    descriptions:
+      business: >
+        Without deletion protection, a single Terraform command can
+        permanently destroy your production database, storage bucket, or
+        data table along with all its data. Think of it like having a
+        "delete everything" button on your desk with no confirmation
+        dialog. This is not hypothetical -- accidental Terraform
+        deletions of production databases are one of the most common
+        infrastructure disasters, and the data loss is permanent.
+      developer: >
+        This stateful resource (RDS, DynamoDB, or S3) has no
+        lifecycle.prevent_destroy = true. Terraform's default behavior is
+        to destroy and recreate resources when certain attributes change
+        (e.g., renaming an RDS instance). Without prevent_destroy, a
+        single terraform apply can delete a production database. Add
+        lifecycle { prevent_destroy = true } so Terraform exits with an
+        error instead of proceeding with destruction.
+    rationale: >
+      Terraform's default behavior is to destroy and recreate resources
+      when certain attributes change (e.g., renaming an RDS instance
+      or changing a DynamoDB table's hash key). Without
+      lifecycle.prevent_destroy, a single terraform apply can delete a
+      production database containing years of data. This is not
+      hypothetical — it is one of the most common Terraform disasters.
+      prevent_destroy makes Terraform exit with an error instead of
+      proceeding with destruction, giving the operator a chance to
+      review. It does not prevent all data loss (you can still remove
+      the resource from state), but it catches the most common
+      accidental deletion scenarios: typos in resource names, attribute
+      changes that force recreation, and over-eager terraform destroy
+      commands. Apply this to every resource that holds state you
+      cannot regenerate.
+    severity: info
+    tags: [terraform, aws, reliability, data-protection]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  resource "aws_db_instance" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_db_instance" "..." {
+                    ...
+                    lifecycle {
+                      ...
+                      prevent_destroy = true
+                      ...
+                    }
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_dynamodb_table" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_dynamodb_table" "..." {
+                    ...
+                    lifecycle {
+                      ...
+                      prevent_destroy = true
+                      ...
+                    }
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "aws_s3_bucket" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "aws_s3_bucket" "..." {
+                    ...
+                    lifecycle {
+                      ...
+                      prevent_destroy = true
+                      ...
+                    }
+                    ...
+                  }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add lifecycle { prevent_destroy = true } to stateful resources.
+      example: |
+        # Before — database can be accidentally destroyed
+        resource "aws_db_instance" "main" {
+          engine         = "postgres"
+          instance_class = "db.t3.medium"
+        }
+
+        # After — Terraform will refuse to destroy
+        resource "aws_db_instance" "main" {
+          engine         = "postgres"
+          instance_class = "db.t3.medium"
+
+          lifecycle {
+            prevent_destroy = true
+          }
+        }
+    references:
+      - https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle#prevent_destroy
+      - https://developer.hashicorp.com/terraform/cli/state/resource-addressing
+
+  # ── Observability & cost ───────────────────────────────────────
+
+  - id: tf-aws-cloudwatch-no-log-retention
+    name: CloudWatch log group without retention_in_days
+    description: >
+      Flags aws_cloudwatch_log_group resources that do not set
+      retention_in_days. Without an explicit retention period, logs are
+      stored indefinitely at continuously growing cost.
+    descriptions:
+      business: >
+        Without a retention period, CloudWatch logs are stored forever at
+        continuously growing cost. A moderately busy service accumulates
+        thousands of dollars per year in log storage that nobody will ever
+        read. Think of it like paying for an ever-expanding storage unit
+        full of old receipts -- the bill grows every month and the
+        contents become less useful over time. Setting a retention period
+        is a one-line change that prevents unbounded cost growth.
+      developer: >
+        This aws_cloudwatch_log_group has no retention_in_days set,
+        meaning logs are stored indefinitely. At $0.03/GB/month, a
+        service generating 10 GB/day accumulates $1,300/year per log
+        group, compounding annually. Set retention_in_days to match your
+        needs: 30 days for dev, 90 for production, 365 for audit logs.
+        For long-term retention, export to S3 Glacier at a fraction of
+        the cost. The default of "never expire" is almost never correct.
+    rationale: >
+      CloudWatch Logs charges per GB ingested and per GB stored per
+      month. Without a retention policy, log groups grow without bound.
+      A moderately busy service generating 10 GB/day of logs
+      accumulates 3.6 TB/year — at $0.03/GB/month storage, that is
+      $1,300/year for a single log group, compounding every year. After
+      two years you are paying to store logs nobody will ever read.
+      Multiply by dozens of services and CloudWatch storage becomes a
+      top-5 AWS cost line item. Set retention_in_days to match your
+      compliance and debugging needs: 30 days for development, 90 days
+      for production, 365 days for audit logs. For long-term retention,
+      export to S3 Glacier at a fraction of the cost. The default of
+      "never expire" is almost never the right choice.
+    severity: warning
+    tags: [terraform, aws, cost-management, observability]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "aws_cloudwatch_log_group" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "aws_cloudwatch_log_group" "..." {
+                ...
+                retention_in_days = ...
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Set retention_in_days to a value appropriate for the log group's purpose.
+      example: |
+        # Before — logs stored forever, cost grows unbounded
+        resource "aws_cloudwatch_log_group" "app" {
+          name = "/ecs/my-app"
+        }
+
+        # After — 90-day retention for production logs
+        resource "aws_cloudwatch_log_group" "app" {
+          name              = "/ecs/my-app"
+          retention_in_days = 90
+        }
+    references:
+      - https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group#retention_in_days
+      - https://aws.amazon.com/cloudwatch/pricing/

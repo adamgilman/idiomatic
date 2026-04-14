@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/adamgilman/idiomatic/main/schemas/rule-pack.schema.json",
+  "title": "Idiomatic Rule Pack",
+  "description": "A rule pack is a collection of rules that share metadata and a release lifecycle. Each rule names a capability and supplies the inputs that capability declares. Rule packs are the unit of standards enforcement.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "pack", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "description": "Schema version. Bumped only on structural breaks.",
+      "const": "rules.idiomatic.dev/v1alpha1"
+    },
+    "kind": {
+      "description": "Discriminator. Always 'RulePack' for this schema.",
+      "const": "RulePack"
+    },
+    "pack": { "$ref": "#/$defs/pack" },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+
+  "$defs": {
+
+    "pack": {
+      "type": "object",
+      "title": "Pack metadata",
+      "description": "Identity and release metadata for the pack as a whole.",
+      "required": ["id", "name", "version", "description", "maintainer"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier within the registry. Lowercase, hyphenated, alphanumeric. Permanent once published — never rename.",
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "examples": ["go-starter", "secrets-detection"]
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable name."
+        },
+        "version": {
+          "type": "string",
+          "description": "Semver version of this pack release. Bump on every change.",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "description": {
+          "type": "string",
+          "description": "What this pack enforces."
+        },
+        "maintainer": {
+          "type": "string",
+          "description": "Who maintains this pack (org, team, or individual)."
+        },
+        "license": {
+          "type": "string",
+          "description": "SPDX license identifier or 'Proprietary'.",
+          "examples": ["MIT", "Apache-2.0", "Proprietary"]
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to documentation or source."
+        },
+        "tags": {
+          "description": "Free-form key-value metadata for discoverability. Conventional keys: language, category, vendor, architecture.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "rule": {
+      "type": "object",
+      "title": "Rule",
+      "description": "One rule in a pack. Names the capability that runs it, supplies the per-rule inputs, declares severity, file globs, and fix guidance.",
+      "required": ["id", "name", "description", "rationale", "severity", "detector", "applies_to", "fix"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique within the pack. Lowercase, hyphenated, alphanumeric. Permanent once published.",
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "examples": ["go-no-panic", "ts-no-explicit-any"]
+        },
+        "name": {
+          "type": "string",
+          "description": "Short human-readable title.",
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "description": "What the rule checks. One or two sentences."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Why this rule exists — the reasoning a senior engineer would give."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["error", "warning", "info"],
+          "description": "error = must fix; warning = should fix; info = awareness."
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Free-form categorization tags."
+        },
+        "detector": { "$ref": "#/$defs/detector" },
+        "applies_to": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "File glob patterns this rule checks. Non-empty.",
+          "examples": [["**/*.go"], ["**/*.ts", "**/*.tsx"]]
+        },
+        "excludes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "File glob patterns to skip."
+        },
+        "fix": { "$ref": "#/$defs/fix" },
+        "references": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri" },
+          "description": "URLs to documentation or rationale."
+        },
+        "tests": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/test" },
+          "description": "Inline test fixtures (strongly recommended)."
+        }
+      }
+    },
+
+    "detector": {
+      "type": "object",
+      "title": "Detector",
+      "description": "Routes the rule to a capability and supplies its inputs.",
+      "required": ["capability", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "type": "string",
+          "description": "Name of a loaded capability (the capability spec's metadata.name).",
+          "examples": ["semgrep", "eslint", "git"]
+        },
+        "version": {
+          "type": "string",
+          "description": "Optional semver constraint on the capability's metadata.version. Empty matches anything. Authors are encouraged to pin to a major version (e.g. '^1') so a future major bump cannot silently change rule behavior. Accepted forms are everything Masterminds/semver/v3 supports: exact (1.0.0), caret (^1, ^1.2), tilde (~1.2), range (>=1.2,<2), wildcard (1.x).",
+          "examples": ["^1", "~1.2", ">=1.2,<2", "1.0.0"]
+        },
+        "config": {
+          "type": "object",
+          "description": "Per-rule inputs. The shape is defined by the named capability's spec.inputs schema. Validation happens at registry load time using the loaded capability's contract.",
+          "minProperties": 1
+        }
+      }
+    },
+
+    "fix": {
+      "type": "object",
+      "title": "Fix guidance",
+      "required": ["message"],
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "Actionable fix instruction.",
+          "maxLength": 200
+        },
+        "example": {
+          "type": "string",
+          "description": "Optional before/after code example."
+        }
+      }
+    },
+
+    "test": {
+      "type": "object",
+      "title": "Inline test",
+      "description": "A test fixture that asserts the rule fires (or doesn't) against a code snippet.",
+      "required": ["name", "should", "code"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Test case name."
+        },
+        "should": {
+          "type": "string",
+          "enum": ["fire", "pass"],
+          "description": "fire = expect a finding; pass = expect no finding."
+        },
+        "code": {
+          "type": "string",
+          "description": "Code snippet to run the rule against."
+        }
+      }
+    }
+  }
+}

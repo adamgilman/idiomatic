@@ -1,0 +1,722 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-httpclient
+  name: Go HTTP Client
+  version: 0.1.0
+  description: >
+    Principal-level HTTP client rules for Go services. Catches missing
+    timeouts, response body leaks, unchecked status codes, TLS
+    misconfigurations, and connection reuse anti-patterns that degrade
+    reliability and security in production.
+  descriptions:
+    business: >
+      Your team uses HTTP calls to connect to APIs, payment providers, and
+      internal services. This pack catches mistakes that leak connections,
+      expose security vulnerabilities, and silently corrupt data -- the kind
+      of bugs that degrade performance gradually or open the door to
+      attackers, costing you in reliability and customer trust.
+    developer: >
+      Go's net/http is powerful but has a surprising number of sharp edges
+      around body lifecycle, connection reuse, and context propagation.
+      These rules enforce the patterns that prevent resource leaks, nil
+      panics on error paths, TLS misconfigurations, and the subtle
+      connection pool exhaustion issues that only show up under production
+      load.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-httpclient.yaml
+  tags:
+    language: go
+    category: http
+    architecture: [services, workers]
+
+rules:
+  # ── Resource management ──────────────────────────────────────
+
+  - id: go-http-body-not-closed
+    name: HTTP response body not closed with defer
+    description: >
+      Flags HTTP responses from Do, Get, or Post where the body is not
+      closed with a deferred call to resp.Body.Close(). Every successful
+      HTTP call returns a body that must be closed, even if you don't
+      read it.
+    descriptions:
+      business: >
+        This code opens a network connection and never closes it. Think of
+        it like leaving every water faucet open after use -- eventually the
+        system runs out of available connections and new requests start
+        failing or timing out. Under real traffic, this causes a slow
+        degradation that is hard to diagnose until the service stops
+        responding entirely.
+      developer: >
+        An unclosed response body holds its underlying TCP connection
+        indefinitely, silently exhausting the client's connection pool
+        (default 2 per host). The GC will eventually finalize it, but
+        that is non-deterministic and far too slow under load. Always defer
+        resp.Body.Close() immediately after the nil-error check.
+    rationale: >
+      An unclosed response body holds its underlying TCP connection open
+      indefinitely. Under load, this silently exhausts the client's
+      connection pool (default 2 per host via Transport.MaxIdleConnsPerHost),
+      causing subsequent requests to block on connection establishment or
+      time out entirely. This is one of the most common Go production
+      incidents and is especially insidious because the leak is invisible
+      until the pool is saturated. The garbage collector will eventually
+      finalize the body, but GC-driven cleanup is non-deterministic and
+      far too slow to prevent pool exhaustion under real traffic.
+    severity: error
+    tags: [http, resource-leak, connection-pool]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  $RESP, $ERR := $CLIENT.Do(...)
+              - pattern-not-inside: |
+                  $RESP, $ERR := $CLIENT.Do(...)
+                  ...
+                  defer $RESP.Body.Close()
+          - patterns:
+              - pattern: |
+                  $RESP, $ERR := $CLIENT.Get(...)
+              - pattern-not-inside: |
+                  $RESP, $ERR := $CLIENT.Get(...)
+                  ...
+                  defer $RESP.Body.Close()
+          - patterns:
+              - pattern: |
+                  $RESP, $ERR := $CLIENT.Post(...)
+              - pattern-not-inside: |
+                  $RESP, $ERR := $CLIENT.Post(...)
+                  ...
+                  defer $RESP.Body.Close()
+          - patterns:
+              - pattern: |
+                  $RESP, $ERR := http.Get(...)
+              - pattern-not-inside: |
+                  $RESP, $ERR := http.Get(...)
+                  ...
+                  defer $RESP.Body.Close()
+          - patterns:
+              - pattern: |
+                  $RESP, $ERR := http.Post(...)
+              - pattern-not-inside: |
+                  $RESP, $ERR := http.Post(...)
+                  ...
+                  defer $RESP.Body.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer resp.Body.Close() immediately after the nil-error check.
+      example: |
+        // Before
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        body, _ := io.ReadAll(resp.Body)
+
+        // After
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        defer resp.Body.Close()
+        body, _ := io.ReadAll(resp.Body)
+    references:
+      - https://pkg.go.dev/net/http#Client.Do
+      - https://go.dev/doc/effective_go#defer
+
+  # ── Error handling ───────────────────────────────────────────
+
+  - id: go-http-status-unchecked
+    name: Response body used without checking status code
+    description: >
+      Flags code that reads the response body without first inspecting
+      resp.StatusCode. A 4xx or 5xx response body typically contains an
+      error page or API error payload, not the expected data.
+    descriptions:
+      business: >
+        This code reads data from an API response without checking whether
+        the request actually succeeded. Think of it like opening a package
+        without checking the shipping label -- if it is an error response
+        instead of real data, your system processes garbage and makes
+        decisions based on corrupt information.
+      developer: >
+        When the server returns a 500 with an HTML error page and you feed
+        resp.Body directly to json.NewDecoder, you get a confusing parse
+        error or silent data corruption. Always check resp.StatusCode
+        before reading the body to convert ambiguous failures into
+        actionable errors.
+    rationale: >
+      When the server returns a 500 with an HTML error page and your code
+      feeds resp.Body directly to json.NewDecoder, you get a confusing
+      JSON parse error instead of a clear HTTP error. Worse, if the
+      response is semi-valid (e.g., an error envelope that partially
+      unmarshals), you get silent data corruption downstream. Checking
+      StatusCode before reading the body is a defensive practice that
+      converts ambiguous failures into actionable errors. This is the
+      second most common HTTP bug in Go production code after unclosed
+      bodies.
+    severity: warning
+    tags: [http, error-handling, data-integrity]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              $RESP, $ERR := $CLIENT.Do(...)
+              ...
+              ... $RESP.Body ...
+          - pattern-not-inside: |
+              $RESP, $ERR := $CLIENT.Do(...)
+              ...
+              ... $RESP.StatusCode ...
+              ...
+              ... $RESP.Body ...
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Check resp.StatusCode before reading resp.Body.
+      example: |
+        // Before
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        defer resp.Body.Close()
+        json.NewDecoder(resp.Body).Decode(&result)
+
+        // After
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        defer resp.Body.Close()
+        if resp.StatusCode != http.StatusOK {
+            return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+        }
+        json.NewDecoder(resp.Body).Decode(&result)
+    references:
+      - https://pkg.go.dev/net/http#Response
+
+  # ── Security ─────────────────────────────────────────────────
+
+  - id: go-http-tls-skip-verify
+    name: TLS certificate verification disabled
+    description: >
+      Flags tls.Config structs with InsecureSkipVerify set to true.
+      Disabling certificate verification removes the primary defense
+      against man-in-the-middle attacks.
+    descriptions:
+      business: >
+        This code disables the security check that verifies you are talking
+        to the real server and not an impostor. Think of it like accepting
+        any ID card without looking at the photo -- an attacker on the
+        network can intercept, read, and modify all your HTTPS traffic,
+        including sensitive customer data and API credentials.
+      developer: >
+        InsecureSkipVerify: true is almost always a "temporary" dev
+        workaround that reaches production. It disables certificate
+        validation entirely, enabling trivial MITM attacks. If you need to
+        trust a self-signed cert, use a custom RootCAs pool in tls.Config
+        instead.
+    rationale: >
+      InsecureSkipVerify: true is almost always introduced as a
+      "temporary" workaround for self-signed certificates in development
+      and then forgotten in production. Once deployed, it allows any
+      attacker on the network path to intercept, read, and modify all
+      HTTPS traffic. If you need to trust a specific self-signed
+      certificate, use a custom RootCAs pool in tls.Config instead.
+      This flag should never appear outside of test code.
+    severity: error
+    tags: [http, security, tls]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          &tls.Config{..., InsecureSkipVerify: true, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Remove InsecureSkipVerify or add a custom RootCAs pool for specific certs.
+      example: |
+        // Before
+        tlsConfig := &tls.Config{InsecureSkipVerify: true}
+
+        // After — trust a specific CA
+        certPool := x509.NewCertPool()
+        certPool.AppendCertsFromPEM(caCert)
+        tlsConfig := &tls.Config{RootCAs: certPool}
+    references:
+      - https://pkg.go.dev/crypto/tls#Config
+      - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/09-Testing_for_Weak_Cryptography/01-Testing_for_Weak_Transport_Layer_Security
+
+  # ── Connection reuse ─────────────────────────────────────────
+
+  - id: go-http-body-not-drained
+    name: Response body closed without being fully read
+    description: >
+      Flags resp.Body.Close() calls where the body has not been fully
+      consumed by io.ReadAll, io.Copy, json.NewDecoder, or similar.
+      Go's HTTP transport can only reuse TCP connections if the body
+      is fully read before closing.
+    descriptions:
+      business: >
+        This code closes a network response without fully reading it, which
+        forces the system to open a brand-new connection for every request
+        instead of reusing existing ones. Think of it like hanging up and
+        redialing for every sentence in a phone call -- it adds latency to
+        every API call and can exhaust network ports under load.
+      developer: >
+        Go's HTTP transport can only reuse a TCP connection if the body is
+        read to EOF before Close(). Closing without draining forces a new
+        TCP+TLS handshake per request (1-3 extra round trips). Use
+        io.Copy(io.Discard, resp.Body) before Close() when you do not need
+        the content.
+    rationale: >
+      Go's net/http transport maintains a pool of idle keep-alive
+      connections. When you close a body without reading it to EOF,
+      the transport cannot determine whether more data remains on the
+      wire, so it must close the underlying TCP connection. Under load,
+      this forces a new TCP handshake (and TLS handshake for HTTPS) for
+      every request, adding 1-3 round trips of latency and increasing
+      TIME_WAIT socket pressure on the host. The standard idiom is
+      io.Copy(io.Discard, resp.Body) before Close() when you don't need
+      the content.
+    severity: warning
+    tags: [http, connection-reuse, performance]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $RESP.Body.Close()
+          - pattern-not-inside: |
+              io.ReadAll($RESP.Body)
+              ...
+              $RESP.Body.Close()
+          - pattern-not-inside: |
+              io.Copy(io.Discard, $RESP.Body)
+              ...
+              $RESP.Body.Close()
+          - pattern-not-inside: |
+              $BODY, $ERR := io.ReadAll($RESP.Body)
+              ...
+              $RESP.Body.Close()
+          - pattern-not-inside: |
+              defer $RESP.Body.Close()
+              ...
+              io.ReadAll($RESP.Body)
+          - pattern-not-inside: |
+              defer $RESP.Body.Close()
+              ...
+              io.Copy(...)
+          - pattern-not-inside: |
+              defer $RESP.Body.Close()
+              ...
+              json.NewDecoder($RESP.Body)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Drain the body with io.Copy(io.Discard, resp.Body) before closing, or read it fully with io.ReadAll.
+      example: |
+        // Before
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        defer resp.Body.Close()
+        // body never read
+
+        // After
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        defer func() {
+            io.Copy(io.Discard, resp.Body)
+            resp.Body.Close()
+        }()
+    references:
+      - https://pkg.go.dev/net/http#Response
+      - https://go.dev/src/net/http/transport.go
+
+  # ── Context and cancellation ─────────────────────────────────
+
+  - id: go-http-new-request-no-context
+    name: http.NewRequest used instead of http.NewRequestWithContext
+    description: >
+      Flags calls to http.NewRequest, which creates a request with a
+      background context. Use http.NewRequestWithContext to propagate
+      the caller's context for cancellation and timeout support.
+    descriptions:
+      business: >
+        This code makes an outbound request that cannot be cancelled when a
+        user disconnects or a timeout expires. Think of it like sending an
+        employee to fetch something with no way to call them back -- if the
+        customer leaves, the work continues for nothing, wasting server
+        resources and potentially delaying other customers.
+      developer: >
+        http.NewRequest uses context.Background() implicitly, so the
+        request cannot be cancelled by the caller and will not inherit any
+        parent deadline. When clients disconnect, the downstream call
+        continues to completion wasting resources. Always use
+        http.NewRequestWithContext(ctx, ...) to propagate cancellation.
+    rationale: >
+      Requests created with http.NewRequest use context.Background()
+      implicitly. This means the request cannot be cancelled by the
+      caller, cannot inherit a parent deadline, and will ignore any
+      upstream context cancellation (e.g., when the HTTP client's own
+      caller disconnects). In a service handling concurrent requests,
+      this leads to goroutine and connection leaks when clients
+      disconnect: the downstream HTTP call continues to completion
+      even though nobody is waiting for the result. Always threading
+      the caller's context through to outbound requests is a
+      fundamental reliability practice.
+    severity: warning
+    tags: [http, context, timeout]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: http.NewRequest(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Replace http.NewRequest with http.NewRequestWithContext, passing the caller's context.
+      example: |
+        // Before
+        req, err := http.NewRequest("GET", url, nil)
+
+        // After
+        req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+    references:
+      - https://pkg.go.dev/net/http#NewRequestWithContext
+      - https://go.dev/blog/context
+
+  # ── Configuration hygiene ────────────────────────────────────
+
+  - id: go-http-hardcoded-url
+    name: Hardcoded URL in HTTP request construction
+    description: >
+      Flags string literals containing http:// or https:// URLs passed
+      directly to HTTP request constructors. URLs should be loaded from
+      configuration for environment portability.
+    descriptions:
+      business: >
+        This code has a server address baked directly into the source code.
+        Think of it like printing a phone number on every page of a
+        document -- if the number changes, you have to reprint everything.
+        Without this fix, moving between staging, production, or a new
+        provider requires a code change and full redeployment instead of a
+        simple config update.
+      developer: >
+        Hardcoded URLs bind the binary to a single environment. You cannot
+        promote the same build artifact from staging to production without
+        recompilation. Extract URLs to environment variables, config files,
+        or constructor parameters to follow twelve-factor app principles.
+    rationale: >
+      Hardcoded URLs bind the binary to a single environment. When you
+      deploy the same binary to staging, production, or a partner
+      environment, hardcoded URLs require a code change, rebuild, and
+      redeploy instead of a simple config update. This violates the
+      twelve-factor app principle of strict separation between config
+      and code. It also makes local development painful when the
+      hardcoded host is unreachable or returns production data.
+    severity: info
+    tags: [http, configuration, twelve-factor]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: http.NewRequest($METHOD, "=~/https?://.*/" , ...)
+              - pattern-not-inside: |
+                  func Test$F(...) { ... }
+          - patterns:
+              - pattern: http.NewRequestWithContext($CTX, $METHOD, "=~/https?://.*/" , ...)
+              - pattern-not-inside: |
+                  func Test$F(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Extract URLs to configuration (environment variable, config file, or constructor parameter).
+      example: |
+        // Before
+        req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.example.com/v1/users", nil)
+
+        // After
+        req, _ := http.NewRequestWithContext(ctx, "GET", cfg.UsersEndpoint, nil)
+    references:
+      - https://12factor.net/config
+
+  # ── API hygiene ──────────────────────────────────────────────
+
+  - id: go-http-no-user-agent
+    name: HTTP request sent without User-Agent header
+    description: >
+      Flags calls to client.Do() where no User-Agent header has been
+      set on the request. Many APIs rate-limit or outright reject
+      requests that lack a User-Agent.
+    descriptions:
+      business: >
+        This code calls an external API without identifying itself. Many
+        API providers throttle or reject anonymous requests. Think of it
+        like calling a business from a blocked number -- they may not pick
+        up. Without a User-Agent, your service may experience higher rate
+        limiting and harder-to-debug cross-service issues.
+      developer: >
+        Go's net/http does not set a default User-Agent (unlike browsers
+        and curl). Many API providers use it for rate limiting tiers and
+        abuse detection. Set a descriptive User-Agent like
+        "myservice/1.2.3" so upstream owners can identify your traffic in
+        their logs when debugging.
+    rationale: >
+      Go's net/http does not set a default User-Agent header (unlike
+      browsers and curl). Many API providers use User-Agent for rate
+      limiting tiers, abuse detection, and debugging. Requests without
+      a User-Agent may be throttled more aggressively or rejected with
+      a 403. Setting a descriptive User-Agent (e.g., "myservice/1.2.3")
+      also makes it vastly easier for upstream service owners to
+      identify your traffic in their logs when debugging cross-service
+      issues.
+    severity: info
+    tags: [http, headers, api-hygiene]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $CLIENT.Do($REQ)
+          - pattern-not-inside: |
+              ...
+              $REQ.Header.Set("User-Agent", ...)
+              ...
+              $CLIENT.Do($REQ)
+          - pattern-not-inside: |
+              ...
+              $REQ.Header.Add("User-Agent", ...)
+              ...
+              $CLIENT.Do($REQ)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Set a User-Agent header on the request before calling Do().
+      example: |
+        // Before
+        req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+        resp, err := client.Do(req)
+
+        // After
+        req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+        req.Header.Set("User-Agent", "myservice/1.0.0")
+        resp, err := client.Do(req)
+    references:
+      - https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/User-Agent
+      - https://pkg.go.dev/net/http#Header
+
+  # ── Security (redirect handling) ─────────────────────────────
+
+  - id: go-http-redirect-follow-blind
+    name: http.Client without CheckRedirect policy
+    description: >
+      Flags http.Client struct literals that do not include a
+      CheckRedirect function. The default policy follows up to 10
+      redirects blindly, which may be exploitable.
+    descriptions:
+      business: >
+        This HTTP client blindly follows redirects wherever they lead. An
+        attacker could trick your service into calling internal systems or
+        cloud metadata endpoints, potentially exposing credentials. Think
+        of it like following any "go here next" sign without checking where
+        it leads -- it could redirect your service to places it should
+        never go.
+      developer: >
+        The default redirect policy follows any redirect chain up to 10
+        hops with no validation. In SSRF scenarios, this can redirect to
+        metadata endpoints (169.254.169.254) or internal hosts.
+        Authorization headers also leak on cross-origin redirects. Set a
+        CheckRedirect policy to restrict targets and strip sensitive
+        headers.
+    rationale: >
+      The default redirect policy follows any redirect chain up to 10
+      hops with no validation. In server-side request scenarios (SSRF),
+      an attacker can redirect your internal service to a metadata
+      endpoint (e.g., http://169.254.169.254/ on AWS) or an internal
+      host. Even without SSRF, blind redirect following can leak
+      Authorization headers to third-party domains when a redirect
+      crosses origins. Setting a CheckRedirect policy lets you limit
+      the number of redirects, restrict target domains, or strip
+      sensitive headers on cross-origin redirects.
+    severity: info
+    tags: [http, security, ssrf]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              &http.Client{...}
+          - pattern-not: |
+              &http.Client{..., CheckRedirect: $F, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Set a CheckRedirect policy on the http.Client to control redirect behavior.
+      example: |
+        // Before
+        client := &http.Client{Timeout: 10 * time.Second}
+
+        // After
+        client := &http.Client{
+            Timeout: 10 * time.Second,
+            CheckRedirect: func(req *http.Request, via []*http.Request) error {
+                if len(via) >= 3 {
+                    return fmt.Errorf("stopped after 3 redirects")
+                }
+                return nil
+            },
+        }
+    references:
+      - https://pkg.go.dev/net/http#Client.CheckRedirect
+      - https://owasp.org/www-community/attacks/Server_Side_Request_Forgery
+
+  # ── Error handling (nil panic) ───────────────────────────────
+
+  - id: go-http-error-body-read
+    name: Response body accessed before error check
+    description: >
+      Flags code that accesses resp.Body (typically via defer
+      resp.Body.Close()) before checking the error returned by Do().
+      If err is non-nil, resp may be nil and accessing resp.Body will
+      panic.
+    descriptions:
+      business: >
+        This code will crash when a network request fails. Think of it like
+        opening a package before checking if it arrived -- if the delivery
+        failed, there is nothing to open and the program crashes. This only
+        happens under failure conditions (DNS errors, timeouts), precisely
+        when your service is already under stress, turning a recoverable
+        error into a full crash.
+      developer: >
+        When err is non-nil from client.Do(), resp is usually nil. Code
+        that defers resp.Body.Close() before the error check will panic
+        with a nil pointer dereference on any transport error. The correct
+        order is always: check err first, then defer body close.
+    rationale: >
+      The net/http documentation states that when err is non-nil, resp
+      is undefined (and usually nil). Code that defers resp.Body.Close()
+      before the error check will panic with a nil pointer dereference
+      on any transport error, DNS failure, or timeout. This is a
+      latent crash that only manifests under failure conditions,
+      precisely when your service is already under stress. The correct
+      order is: check err first, then defer body close. This is one of
+      the most commonly miswritten patterns in Go, and LLMs reproduce
+      it frequently.
+    severity: warning
+    tags: [http, error-handling, nil-panic]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          $RESP, $ERR := $CLIENT.Do(...)
+          ...
+          defer $RESP.Body.Close()
+          ...
+          if $ERR != nil { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Check the error return from Do() before accessing resp.Body.
+      example: |
+        // Before (panics if err != nil)
+        resp, err := client.Do(req)
+        defer resp.Body.Close()
+        if err != nil { return err }
+
+        // After (safe)
+        resp, err := client.Do(req)
+        if err != nil { return err }
+        defer resp.Body.Close()
+    references:
+      - https://pkg.go.dev/net/http#Client.Do
+
+  # ── Connection pool management ───────────────────────────────
+
+  - id: go-http-transport-not-reused
+    name: http.Transport created inside a function
+    description: >
+      Flags http.Transport construction inside function bodies
+      (excluding init() and New* constructors). Transports hold
+      connection pools and TLS session caches that should be reused
+      across requests.
+    descriptions:
+      business: >
+        This code creates a new connection pool for every request instead
+        of reusing one. Think of it like buying a new phone every time you
+        want to make a call -- it wastes resources and adds unnecessary
+        delay. Under load, this causes port exhaustion and slower response
+        times for your customers.
+      developer: >
+        Each http.Transport maintains its own connection pool, DNS cache,
+        and TLS session cache. Creating one per-request forces a fresh
+        TCP+TLS handshake every time (1-3 extra round trips) and can
+        exhaust ephemeral ports. Create Transports once at package level,
+        in struct fields, or in constructors, and reuse them.
+    rationale: >
+      Each http.Transport maintains its own connection pool, DNS cache,
+      and TLS session cache. Creating a Transport per-request (or
+      per-function-call) means every request performs a fresh TCP
+      handshake and TLS negotiation, adding 1-3 round trips of latency.
+      It also creates socket churn that can exhaust ephemeral ports
+      under load (leading to "bind: address already in use" errors).
+      Transports should be created once -- as package-level variables,
+      struct fields, or in constructors -- and reused for the lifetime
+      of the process. http.DefaultTransport exists precisely for this
+      reason.
+    severity: warning
+    tags: [http, connection-pool, performance]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  func $F(...) (...) {
+                      ...
+                      $T := &http.Transport{...}
+                      ...
+                  }
+              - pattern: |
+                  func $F(...) (...) {
+                      ...
+                      $T := http.DefaultTransport.(*http.Transport).Clone()
+                      ...
+                  }
+          - pattern-not-inside: |
+              func init() { ... }
+          - pattern-not-inside: |
+              func New$NAME(...) (...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move Transport creation to a package-level variable, struct field, or New* constructor.
+      example: |
+        // Before
+        func fetchData(url string) (*Data, error) {
+            t := &http.Transport{MaxIdleConns: 10}
+            client := &http.Client{Transport: t}
+            resp, err := client.Get(url)
+            ...
+        }
+
+        // After
+        var transport = &http.Transport{MaxIdleConns: 10}
+        var client = &http.Client{Transport: transport}
+
+        func fetchData(url string) (*Data, error) {
+            resp, err := client.Get(url)
+            ...
+        }
+    references:
+      - https://pkg.go.dev/net/http#Transport
+      - https://go.dev/doc/articles/wiki/#tmp_10

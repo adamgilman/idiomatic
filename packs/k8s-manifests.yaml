@@ -1,0 +1,1079 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: k8s-manifests
+  name: Kubernetes Manifests
+  version: 0.1.0
+  description: >
+    Principal-level Kubernetes manifest review rules. Catches missing
+    resource limits, absent health probes, security misconfigurations,
+    and operational gaps that cause incidents in production clusters.
+  descriptions:
+    business: >
+      Your Kubernetes configuration determines whether your services stay
+      up and stay secure under real-world traffic. This pack catches the
+      misconfigurations that lead to outages during deployments, security
+      breaches from overly permissive containers, and cascading failures
+      when one service hogs all the resources on a shared cluster. These
+      are the issues that cause 3 AM pages and multi-hour customer-facing
+      downtime.
+    developer: >
+      These rules catch the Kubernetes misconfigurations that pass code
+      review because they "work in dev" but cause incidents in production
+      -- missing resource limits that let a single pod OOM-kill its
+      neighbors, absent health probes that send traffic to containers that
+      aren't ready, containers running as root with full capabilities, and
+      availability gaps like missing PodDisruptionBudgets that take down
+      all replicas during routine node drains.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/k8s-manifests.yaml
+  tags:
+    vendor: kubernetes
+    category: infrastructure
+    architecture: [services, workers]
+
+rules:
+  # ── Resource management ──────────────────────────────────────
+
+  - id: k8s-no-resource-limits
+    name: Container spec without resources.limits
+    description: >
+      Flags container definitions that do not specify resources.limits.
+      Without limits, a single pod can consume all CPU and memory on a
+      node, starving co-located workloads.
+    descriptions:
+      business: >
+        Without resource limits, a single misbehaving service can consume
+        all available compute on a server, taking down every other service
+        running alongside it. Think of it like one tenant in an office
+        building cranking up the AC so high that every other office freezes.
+        This causes cascading outages that affect multiple teams and
+        customers simultaneously.
+      developer: >
+        This container spec has no resources.limits set. In production on a
+        shared node, a memory leak or CPU spin-loop will consume the entire
+        node's capacity, triggering OOM kills on co-located pods. Without
+        limits the pod gets BestEffort QoS class, meaning it is the first
+        evicted under pressure. Always set both cpu and memory limits so
+        cgroups enforce a ceiling.
+    rationale: >
+      In a shared cluster, a container without resource limits is a
+      ticking time bomb. One memory leak or CPU spin-loop and the
+      container consumes the entire node's capacity, triggering OOM
+      kills on unrelated pods. The kubelet's eviction manager starts
+      killing pods by QoS class — and without limits your pod is
+      BestEffort, first to die. Worse, if it's the noisy neighbor
+      rather than the victim, it causes cascading failures across
+      every workload on that node. Always set both cpu and memory
+      limits. The scheduler uses limits for admission decisions, and
+      the kernel enforces them via cgroups. This is not optional in
+      production.
+    severity: error
+    tags: [kubernetes, resources, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  resources:
+                    ...
+                    limits:
+                      ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Add resources.limits with cpu and memory to every container spec.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            resources:
+              limits:
+                cpu: "500m"
+                memory: "512Mi"
+              requests:
+                cpu: "250m"
+                memory: "256Mi"
+    references:
+      - https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+      - https://kubernetes.io/docs/tasks/configure-pod-container/assign-memory-resource/
+
+  - id: k8s-no-resource-requests
+    name: Container spec without resources.requests
+    description: >
+      Flags container definitions that do not specify resources.requests.
+      The scheduler cannot make intelligent placement decisions without
+      resource requests.
+    descriptions:
+      business: >
+        Without resource requests, Kubernetes has no idea how much capacity
+        your service actually needs, so it packs services onto servers
+        randomly. This leads to unpredictable slowdowns and outages when
+        services compete for the same resources -- like overbooking a
+        flight where everyone shows up. Customers experience intermittent
+        latency spikes that are nearly impossible to diagnose.
+      developer: >
+        This container spec has no resources.requests. The scheduler treats
+        it as needing zero resources and places it anywhere, even on nodes
+        already at capacity. The pod gets BestEffort QoS, making it first
+        in line for eviction under memory pressure. Set accurate requests
+        so the scheduler reserves capacity and your pod survives node-level
+        contention.
+    rationale: >
+      Resource requests are the scheduler's only input for bin-packing
+      pods onto nodes. Without requests, the scheduler treats the pod
+      as needing zero resources and places it anywhere — even on a node
+      that is already at capacity. This leads to overcommitted nodes
+      where pods compete for resources with no guarantees. The result
+      is unpredictable latency spikes, CPU throttling, and OOM kills
+      that appear random. Additionally, pods without requests are
+      classified as BestEffort QoS, meaning they are evicted first
+      under memory pressure. Setting accurate requests ensures the
+      scheduler reserves capacity and your pod survives node-level
+      resource contention.
+    severity: error
+    tags: [kubernetes, resources, scheduling]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  resources:
+                    ...
+                    requests:
+                      ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Add resources.requests with cpu and memory to every container spec.
+      example: |
+        # Before
+        containers:
+          - name: worker
+            image: myapp:1.2.3
+
+        # After
+        containers:
+          - name: worker
+            image: myapp:1.2.3
+            resources:
+              requests:
+                cpu: "250m"
+                memory: "256Mi"
+              limits:
+                cpu: "500m"
+                memory: "512Mi"
+    references:
+      - https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits
+      - https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/
+
+  # ── Health checks ────────────────────────────────────────────
+
+  - id: k8s-no-liveness-probe
+    name: Container without livenessProbe
+    description: >
+      Flags container definitions that do not include a livenessProbe.
+      Without a liveness probe, Kubernetes cannot detect deadlocked or
+      hung processes.
+    descriptions:
+      business: >
+        Without a liveness probe, a service can silently freeze or hang
+        while appearing to be running normally. Think of it like a
+        receptionist who falls asleep at the desk -- the phone still shows
+        "in service" but nobody is answering. Customers see timeouts and
+        errors, but the system never automatically recovers. This turns a
+        minor glitch into an extended outage.
+      developer: >
+        This container has no livenessProbe. If the process deadlocks,
+        enters an infinite loop, or silently hangs, the kubelet has no way
+        to detect it. The pod stays in Running state indefinitely,
+        consuming resources but serving zero traffic. The ReplicaSet sees
+        no reason to replace it. Add an httpGet, tcpSocket, or exec probe
+        so the kubelet restarts the container on failure.
+    rationale: >
+      A liveness probe tells the kubelet when to restart a container.
+      Without one, a process that deadlocks, enters an infinite loop,
+      or silently hangs will stay running indefinitely — consuming
+      resources but serving zero traffic. The pod stays in Running
+      state, passes no health checks, and the ReplicaSet sees no
+      reason to replace it. In a multi-replica deployment this
+      silently reduces your capacity. In a single-replica deployment
+      it is a full outage with no automatic recovery. Liveness probes
+      are your automated on-call engineer: they detect and remediate
+      application-level failures that the kernel cannot see.
+    severity: warning
+    tags: [kubernetes, health-check, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  livenessProbe:
+                    ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Add a livenessProbe (httpGet, tcpSocket, or exec) to every container.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            livenessProbe:
+              httpGet:
+                path: /healthz
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+              failureThreshold: 3
+    references:
+      - https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+      - https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/
+
+  - id: k8s-no-readiness-probe
+    name: Container without readinessProbe
+    description: >
+      Flags container definitions that do not include a readinessProbe.
+      Traffic will be sent to pods that aren't ready to serve, causing
+      5xx errors during rollouts and restarts.
+    descriptions:
+      business: >
+        Without a readiness probe, your system sends customer traffic to
+        services that haven't finished starting up yet. This causes a burst
+        of errors every time you deploy a new version -- like opening a
+        restaurant before the kitchen is ready. Customers see 5xx errors
+        during every deployment, undermining confidence in your product's
+        reliability.
+      developer: >
+        This container has no readinessProbe. Without one, the pod is added
+        to the Service's endpoint list the moment its containers start,
+        before the app has loaded config, warmed caches, or connected to
+        databases. During rolling deployments, new pods receive requests
+        before they can handle them, causing a burst of 5xx errors. Add a
+        readinessProbe so Kubernetes only routes traffic once the app is
+        genuinely ready.
+    rationale: >
+      A readiness probe controls whether a pod receives traffic via
+      Services. Without one, the pod is added to the Service's
+      endpoint list the moment its containers start — before the
+      application has loaded configuration, warmed caches, or
+      established database connections. During rolling deployments,
+      this means the new pod receives requests before it can handle
+      them, causing a burst of 5xx errors. During restarts, the same
+      pattern repeats. With a readiness probe, Kubernetes only routes
+      traffic once the application signals it is genuinely ready. This
+      is the difference between zero-downtime deployments and
+      deployments with an error spike.
+    severity: warning
+    tags: [kubernetes, health-check, availability]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  readinessProbe:
+                    ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Add a readinessProbe to every container that receives traffic.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            readinessProbe:
+              httpGet:
+                path: /ready
+                port: 8080
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              failureThreshold: 3
+    references:
+      - https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+
+  # ── Image management ─────────────────────────────────────────
+
+  - id: k8s-latest-tag
+    name: Container image using :latest tag or no tag
+    description: >
+      Flags container images that use the :latest tag or omit the tag
+      entirely. Deployments become non-reproducible and rollbacks are
+      impossible.
+    descriptions:
+      business: >
+        Using the "latest" image tag means your deployments are running
+        whatever version was most recently published, which can change
+        without warning. Think of it like ordering "today's special" at a
+        restaurant -- you never know what you'll get. If something breaks
+        in production, you cannot roll back because there is no specific
+        version to roll back to, turning a minor issue into an extended
+        outage.
+      developer: >
+        This container image uses :latest or omits the tag entirely
+        (which defaults to :latest). The tag is mutable -- two pods in the
+        same Deployment can run different code if a new image was pushed
+        between their scheduling. Rollbacks via kubectl rollout undo do
+        nothing because the tag hasn't changed. Pin to an immutable tag
+        (semver or SHA digest) for reproducible deployments.
+    rationale: >
+      The :latest tag is mutable — it points to whatever was pushed
+      last. Two pods in the same Deployment can run different code if
+      a new image was pushed between their scheduling. Rollbacks via
+      kubectl rollout undo do nothing because the tag hasn't changed.
+      Debugging production issues becomes impossible when you cannot
+      determine which exact code is running. Omitting the tag entirely
+      defaults to :latest, compounding the problem silently. Always
+      pin images to an immutable tag (a semantic version or a SHA
+      digest). This makes deployments reproducible, diffs meaningful,
+      and rollbacks instantaneous.
+    severity: error
+    tags: [kubernetes, images, reproducibility]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              image: $IMAGE
+          - metavariable-regex:
+              metavariable: $IMAGE
+              regex: ".*:latest$|^[^:]+$"
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Pin images to an immutable tag (semver or SHA digest), never use :latest.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:latest
+          - name: sidecar
+            image: envoyproxy/envoy
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+          - name: sidecar
+            image: envoyproxy/envoy:v1.28.0
+    references:
+      - https://kubernetes.io/docs/concepts/containers/images/#image-names
+      - https://kubernetes.io/docs/concepts/configuration/overview/#container-images
+
+  # ── Security ─────────────────────────────────────────────────
+
+  - id: k8s-run-as-root
+    name: Container running as root
+    description: >
+      Flags containers that set runAsUser: 0 or omit
+      securityContext.runAsNonRoot: true. Running as root inside a
+      container is a privilege escalation vector.
+    descriptions:
+      business: >
+        Running a container as root means that if an attacker compromises
+        your service, they could gain full control of the underlying
+        server. Think of it like giving every employee a master key to
+        the entire building instead of just their office. This is the
+        single most common container security finding in breach reports
+        and compliance audits, and it puts customer data directly at risk.
+      developer: >
+        This container runs as root (UID 0) or doesn't set runAsNonRoot:
+        true. Container isolation is not a security boundary -- a
+        container escape vulnerability (like CVE-2019-5736) combined with
+        root inside the container grants root on the host. Set
+        runAsNonRoot: true in securityContext so the kubelet rejects the
+        pod if the image defaults to root. This is the highest-impact
+        container security control.
+    rationale: >
+      Container isolation is not a security boundary — it is a
+      defense-in-depth layer. When a container runs as root (UID 0),
+      a container escape vulnerability grants the attacker root on the
+      host node. CVE-2019-5736 (runc escape) and CVE-2020-15257
+      (containerd shim) both required root inside the container to
+      exploit. Setting runAsNonRoot: true causes the kubelet to reject
+      the pod if the container image runs as root, catching
+      misconfigurations at admission time rather than in production.
+      This is the single most impactful container security control.
+    severity: error
+    tags: [kubernetes, security, privilege-escalation]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  containers:
+                    - ...
+                      name: $NAME
+                      ...
+              - pattern-not: |
+                  containers:
+                    - ...
+                      name: $NAME
+                      ...
+                      securityContext:
+                        ...
+                        runAsNonRoot: true
+                        ...
+          - pattern: |
+              securityContext:
+                ...
+                runAsUser: 0
+                ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Set securityContext.runAsNonRoot to true and use a non-root user in your Dockerfile.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            securityContext:
+              runAsUser: 0
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65534
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+      - https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+
+  - id: k8s-privileged-container
+    name: Container running in privileged mode
+    description: >
+      Flags containers with securityContext.privileged set to true.
+      Privileged containers have full access to the host.
+    descriptions:
+      business: >
+        A privileged container has unrestricted access to the underlying
+        server -- it can see all data, modify system settings, and access
+        every other service on that machine. If compromised, an attacker
+        owns not just this service but everything running alongside it.
+        This is like leaving the vault door open because it was more
+        convenient. A single breach here could expose your entire
+        infrastructure.
+      developer: >
+        This container has securityContext.privileged: true, which disables
+        nearly all kernel-level isolation. The container can see all host
+        devices, load kernel modules, modify iptables, and access the host
+        filesystem. If compromised, the attacker owns the node and can use
+        kubelet credentials to pivot to other pods. Use
+        securityContext.capabilities.add for specific capabilities instead
+        of granting everything.
+    rationale: >
+      A privileged container disables almost all kernel-level
+      isolation. The container can see all devices on the host, load
+      kernel modules, modify iptables rules, and access the host's
+      filesystem. This is functionally equivalent to running the
+      process directly on the host as root. If the container is
+      compromised, the attacker owns the node — and from the node,
+      can access the kubelet credentials to pivot to other pods or
+      the API server. There is almost never a legitimate reason for
+      privileged mode in application workloads. If you need specific
+      capabilities (e.g., NET_ADMIN for a CNI plugin), add them
+      individually via securityContext.capabilities.add instead of
+      granting everything.
+    severity: error
+    tags: [kubernetes, security, privilege-escalation]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        pattern: |
+          securityContext:
+            ...
+            privileged: true
+            ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: "Remove privileged: true. Use capabilities.add for specific needs."
+      example: |
+        # Before
+        containers:
+          - name: debug
+            image: myapp:1.2.3
+            securityContext:
+              privileged: true
+
+        # After
+        containers:
+          - name: debug
+            image: myapp:1.2.3
+            securityContext:
+              privileged: false
+              capabilities:
+                drop: ["ALL"]
+                add: ["NET_BIND_SERVICE"]
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+      - https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+
+  - id: k8s-no-read-only-root-filesystem
+    name: Container without read-only root filesystem
+    description: >
+      Flags containers that do not set
+      securityContext.readOnlyRootFilesystem to true. Writable
+      filesystems allow attackers to modify binaries or drop malware.
+    descriptions:
+      business: >
+        A writable filesystem inside a container lets an attacker install
+        malware, modify your application code, or plant a persistent
+        backdoor if they gain access. Think of it like leaving your office
+        unlocked overnight -- anyone who gets in can rearrange or replace
+        everything. Making the filesystem read-only is a simple change that
+        blocks an entire class of attacks.
+      developer: >
+        This container does not set readOnlyRootFilesystem: true. A
+        writable root filesystem lets an attacker with code execution
+        modify application binaries, install tools (curl, nmap), or plant
+        persistent backdoors. Set readOnlyRootFilesystem: true and use
+        emptyDir volumes mounted at specific paths for any directories
+        the application needs to write to (temp files, caches).
+    rationale: >
+      A writable root filesystem lets an attacker who gains code
+      execution inside the container modify application binaries,
+      install tools (curl, wget, nmap), create cron jobs, or plant
+      persistent backdoors. A read-only root filesystem makes the
+      container immutable at runtime — any write attempt to the root
+      filesystem fails. Applications that need to write to specific
+      paths (temp files, caches) can use emptyDir volumes mounted at
+      those paths. This is defense-in-depth: even if an attacker gets
+      a shell, they cannot modify the container's filesystem to
+      persist their access or install exploitation tools.
+    severity: warning
+    tags: [kubernetes, security, hardening]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  securityContext:
+                    ...
+                    readOnlyRootFilesystem: true
+                    ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Set securityContext.readOnlyRootFilesystem to true. Use emptyDir volumes for writable paths.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            securityContext:
+              readOnlyRootFilesystem: true
+            volumeMounts:
+              - name: tmp
+                mountPath: /tmp
+        volumes:
+          - name: tmp
+            emptyDir: {}
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+      - https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+
+  - id: k8s-no-security-context
+    name: Pod spec with no securityContext
+    description: >
+      Flags pod specs that do not define a securityContext at all.
+      Kubernetes security defaults are permissive — containers run as
+      root with full capabilities unless explicitly restricted.
+    descriptions:
+      business: >
+        Without an explicit security configuration, Kubernetes uses its
+        most permissive defaults -- your containers run with full
+        administrative privileges. This is like installing a new door but
+        never adding a lock. Every security audit and compliance framework
+        will flag this, and it means your services are running with far
+        more access than they need, increasing the blast radius of any
+        breach.
+      developer: >
+        This pod spec has no securityContext at all. Kubernetes defaults
+        are permissive: the container may run as root,
+        allowPrivilegeEscalation defaults to true, all Linux capabilities
+        are available, and the root filesystem is writable. Define a
+        securityContext at the pod or container level to explicitly set
+        runAsNonRoot, drop capabilities, and enable
+        readOnlyRootFilesystem.
+    rationale: >
+      When no securityContext is specified, Kubernetes applies
+      permissive defaults: the container may run as root,
+      allowPrivilegeEscalation defaults to true, all Linux
+      capabilities are available, and the root filesystem is
+      writable. This means every container without an explicit
+      security context is a potential attack surface. A single
+      missing securityContext block means you are relying on the
+      container image's Dockerfile to set the user — and many
+      popular images default to root. Always define a securityContext
+      at the pod or container level to explicitly set runAsNonRoot,
+      drop capabilities, and enable readOnlyRootFilesystem.
+    severity: warning
+    tags: [kubernetes, security, hardening]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  securityContext:
+                    ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Add a securityContext to every container with least-privilege settings.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            securityContext:
+              runAsNonRoot: true
+              readOnlyRootFilesystem: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+    references:
+      - https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: k8s-allow-privilege-escalation
+    name: allowPrivilegeEscalation not set to false
+    description: >
+      Flags containers that do not explicitly set
+      allowPrivilegeEscalation to false. The field defaults to true,
+      allowing container processes to gain more privileges than their
+      parent process.
+    descriptions:
+      business: >
+        This configuration allows processes inside your container to
+        escalate their own permissions to a higher level. Think of it like
+        a regular employee being able to promote themselves to admin
+        without anyone approving it. If an attacker gets a foothold in
+        this container, they can upgrade their access to take full control,
+        significantly increasing the damage from any security incident.
+      developer: >
+        This container does not set allowPrivilegeEscalation: false. The
+        field defaults to true in Kubernetes, meaning any setuid binary or
+        file capability can be used to escalate to root inside the
+        container. Setting it to false enables the kernel's no_new_privs
+        flag, blocking this vector entirely. Combined with dropping all
+        capabilities, this makes privilege escalation virtually impossible.
+        Every security framework (CIS, NSA/CISA, Pod Security Standards
+        "restricted") requires this.
+    rationale: >
+      allowPrivilegeEscalation controls whether a process can gain
+      more privileges than its parent via setuid binaries, file
+      capabilities, or other mechanisms. It defaults to true in
+      Kubernetes, which means any container that doesn't explicitly
+      disable it allows SUID exploits. An attacker with code
+      execution can use a setuid binary to escalate to root inside
+      the container, then chain this with a container escape. Setting
+      allowPrivilegeEscalation: false blocks this vector entirely by
+      setting the kernel's no_new_privs flag. Combined with dropping
+      all capabilities, this makes privilege escalation inside the
+      container virtually impossible. Every security framework (CIS
+      Benchmark, NSA/CISA hardening guide, Pod Security Standards
+      "restricted") requires this.
+    severity: error
+    tags: [kubernetes, security, privilege-escalation]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+          - pattern-not: |
+              containers:
+                - ...
+                  name: $NAME
+                  ...
+                  securityContext:
+                    ...
+                    allowPrivilegeEscalation: false
+                    ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Set securityContext.allowPrivilegeEscalation to false on every container.
+      example: |
+        # Before
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            securityContext:
+              runAsNonRoot: true
+
+        # After
+        containers:
+          - name: api
+            image: myapp:1.2.3
+            securityContext:
+              runAsNonRoot: true
+              allowPrivilegeEscalation: false
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+      - https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-container
+
+  # ── Networking ───────────────────────────────────────────────
+
+  - id: k8s-host-network
+    name: Pod using hostNetwork
+    description: >
+      Flags pods with hostNetwork set to true. This bypasses network
+      policies and exposes the pod on the node's network namespace.
+    descriptions:
+      business: >
+        Using host networking bypasses all the network security boundaries
+        your team has set up. Think of it like connecting a personal laptop
+        directly to the corporate backbone, bypassing the firewall. If
+        this container is compromised, the attacker can see and interact
+        with every other service on that server, and all network security
+        policies become useless for containing the damage.
+      developer: >
+        This pod has hostNetwork: true, which places it in the host's
+        network namespace. The pod shares the node's IP, can bind to any
+        port, and bypasses all NetworkPolicy enforcement. An attacker who
+        compromises it can sniff all node traffic, access the kubelet API
+        on localhost:10250, and communicate with any pod unrestricted.
+        Remove hostNetwork and use a Service to expose the application.
+    rationale: >
+      hostNetwork: true places the pod in the host's network
+      namespace. The pod shares the node's IP address, can bind to
+      any port on the node, and bypasses all NetworkPolicy
+      enforcement. This means network segmentation — your primary
+      tool for limiting blast radius — is completely ineffective for
+      this pod. An attacker who compromises the pod can sniff all
+      traffic on the node's network interfaces, access services
+      bound to localhost on the node (including the kubelet API on
+      port 10250), and communicate with any pod on any node without
+      restriction. hostNetwork should only be used for system-level
+      components (CNI plugins, kube-proxy) that genuinely need it,
+      never for application workloads.
+    severity: warning
+    tags: [kubernetes, security, networking]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        pattern: |
+          hostNetwork: true
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: "Remove hostNetwork: true. Use a Service to expose your application."
+      example: |
+        # Before
+        spec:
+          hostNetwork: true
+          containers:
+            - name: api
+              image: myapp:1.2.3
+
+        # After
+        spec:
+          containers:
+            - name: api
+              image: myapp:1.2.3
+              ports:
+                - containerPort: 8080
+        ---
+        apiVersion: v1
+        kind: Service
+        spec:
+          ports:
+            - port: 80
+              targetPort: 8080
+    references:
+      - https://kubernetes.io/docs/concepts/services-networking/
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  # ── Availability ─────────────────────────────────────────────
+
+  - id: k8s-no-pod-disruption-budget
+    name: Deployment or StatefulSet without PodDisruptionBudget consideration
+    description: >
+      Flags Deployment and StatefulSet resources with replicas > 1 as
+      a reminder to ensure a corresponding PodDisruptionBudget exists.
+      Without a PDB, voluntary disruptions (node drains, cluster
+      upgrades) can take down all replicas simultaneously.
+    descriptions:
+      business: >
+        Without a PodDisruptionBudget, routine infrastructure maintenance
+        like server upgrades can accidentally shut down all copies of your
+        service at once, causing a full customer-facing outage. Think of
+        it like a building manager turning off power to every floor at
+        once during an electrical upgrade instead of doing it one floor at
+        a time. A simple configuration prevents this entirely.
+      developer: >
+        This multi-replica workload has no PodDisruptionBudget. During
+        node drains (cluster upgrades, autoscaler scale-downs, spot
+        terminations), the eviction API has no constraints and can evict
+        all replicas simultaneously. Create a PDB with minAvailable or
+        maxUnavailable to ensure Kubernetes keeps enough replicas running
+        during voluntary disruptions.
+    rationale: >
+      During cluster upgrades, node maintenance, or autoscaler
+      scale-downs, Kubernetes drains nodes by evicting pods. Without
+      a PodDisruptionBudget, the eviction API has no constraints —
+      it can evict all replicas of your Deployment at once, causing
+      a complete outage during what should be a routine maintenance
+      operation. A PDB tells Kubernetes "always keep at least N
+      replicas running" during voluntary disruptions, ensuring your
+      application survives node drains gracefully. This is especially
+      critical for stateful workloads where simultaneous restart of
+      all replicas can cause data loss or split-brain scenarios.
+      Note: PDBs are typically defined in separate files. This rule
+      serves as a reminder to verify a PDB exists for this workload.
+    severity: info
+    tags: [kubernetes, availability, operations]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        pattern-either:
+          - pattern: |
+              kind: Deployment
+              ...
+              spec:
+                ...
+                replicas: $REPLICAS
+                ...
+          - pattern: |
+              kind: StatefulSet
+              ...
+              spec:
+                ...
+                replicas: $REPLICAS
+                ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Create a PodDisruptionBudget for this workload to protect against voluntary disruptions.
+      example: |
+        # Ensure a PDB exists for your Deployment/StatefulSet:
+        apiVersion: policy/v1
+        kind: PodDisruptionBudget
+        metadata:
+          name: api-pdb
+        spec:
+          minAvailable: 1
+          selector:
+            matchLabels:
+              app: api
+    references:
+      - https://kubernetes.io/docs/tasks/run-application/configure-pdb/
+      - https://kubernetes.io/docs/concepts/workloads/pods/disruptions/
+
+  - id: k8s-no-anti-affinity
+    name: Multi-replica workload without podAntiAffinity
+    description: >
+      Flags Deployments and StatefulSets with replicas > 1 that do not
+      define podAntiAffinity. All replicas could land on the same
+      node, making high availability meaningless.
+    descriptions:
+      business: >
+        Running multiple copies of your service for reliability is
+        pointless if they all end up on the same server. When that server
+        goes down, all copies go down together. Think of it like storing
+        all your backups in the same building as the originals -- a single
+        fire destroys everything. Anti-affinity ensures your replicas are
+        spread across different servers so a single failure can never take
+        down the whole service.
+      developer: >
+        This multi-replica workload has no podAntiAffinity. Without it,
+        the scheduler optimizes for bin-packing efficiency and may place
+        all replicas on the same node. A single node failure then takes
+        out 100% of your replicas despite having configured HA. Add
+        podAntiAffinity with topologyKey: kubernetes.io/hostname (or the
+        zone key for cross-AZ spreading) to ensure replicas land on
+        different nodes.
+    rationale: >
+      Running 3 replicas means nothing if all 3 are on the same node.
+      When that node fails (hardware fault, kernel panic, cloud
+      provider maintenance), all replicas go down simultaneously and
+      your application has a full outage — despite being configured
+      for high availability. podAntiAffinity tells the scheduler to
+      spread replicas across different nodes (or availability zones).
+      Use preferredDuringSchedulingIgnoredDuringExecution for
+      best-effort spreading that won't block scheduling, or
+      requiredDuringSchedulingIgnoredDuringExecution when spreading
+      is mandatory. Without anti-affinity, the scheduler optimizes
+      for bin-packing efficiency, which actively works against your
+      HA goals by concentrating pods on fewer nodes.
+    severity: info
+    tags: [kubernetes, availability, scheduling]
+    detector:
+      capability: semgrep
+      config:
+        language: yaml
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  kind: Deployment
+                  ...
+                  spec:
+                    ...
+                    replicas: $REPLICAS
+                    ...
+                    template:
+                      ...
+                      spec:
+                        ...
+              - pattern: |
+                  kind: StatefulSet
+                  ...
+                  spec:
+                    ...
+                    replicas: $REPLICAS
+                    ...
+                    template:
+                      ...
+                      spec:
+                        ...
+          - pattern-not: |
+              spec:
+                ...
+                template:
+                  ...
+                  spec:
+                    ...
+                    affinity:
+                      ...
+                      podAntiAffinity:
+                        ...
+    applies_to: ["**/*.yaml", "**/*.yml"]
+    excludes: ["**/node_modules/**", "**/vendor/**"]
+    fix:
+      message: Add podAntiAffinity to spread replicas across nodes or zones.
+      example: |
+        # Before
+        spec:
+          replicas: 3
+          template:
+            spec:
+              containers:
+                - name: api
+                  image: myapp:1.2.3
+
+        # After
+        spec:
+          replicas: 3
+          template:
+            spec:
+              affinity:
+                podAntiAffinity:
+                  preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 100
+                      podAffinityTerm:
+                        labelSelector:
+                          matchExpressions:
+                            - key: app
+                              operator: In
+                              values: ["api"]
+                        topologyKey: kubernetes.io/hostname
+              containers:
+                - name: api
+                  image: myapp:1.2.3
+    references:
+      - https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#inter-pod-affinity-and-anti-affinity
+      - https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#an-example-of-a-pod-that-uses-pod-affinity

@@ -1,0 +1,30 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: test-many-violations
+  name: Test Many Violations
+  version: 0.0.1
+  description: Rules for integration test many-violations fixture.
+  maintainer: test
+
+rules:
+  - id: go-tdd-no-fmt-println
+    name: No fmt.Println outside of main packages
+    description: |
+      Flags any call to fmt.Println in Go source files whose package is not main.
+    rationale: |
+      Production code should use a structured logger, not fmt.Println.
+    severity: error
+    tags:
+      - logging
+      - go
+    detector:
+      backend: go-analysis
+      id: no-fmt-println-outside-main
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+    fix:
+      message: Replace fmt.Println with a structured logger call.

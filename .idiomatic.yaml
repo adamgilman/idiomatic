@@ -1,0 +1,13 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: ProjectConfig
+
+capabilities:
+  - repo: https://github.com/adamgilman/idiomatic
+    path:
+      - capabilities/semgrep.yaml
+      - capabilities/eslint.yaml
+
+packs:
+  - repo: https://github.com/adamgilman/idiomatic
+    path:
+      - packs/go-starter.yaml

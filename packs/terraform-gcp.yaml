@@ -1,0 +1,753 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: terraform-gcp
+  name: Terraform GCP
+  version: 0.1.0
+  description: >
+    Principal-level Terraform rules for GCP infrastructure. Catches
+    security misconfigurations, missing encryption, overly permissive
+    access policies, and operational gaps that cause security incidents
+    and compliance failures.
+  descriptions:
+    business: >
+      Your Terraform configuration determines whether your GCP
+      infrastructure stays secure and keeps your data safe. This pack
+      catches the misconfigurations that lead to security breaches
+      (databases with public IPs, storage buckets publicly readable),
+      and permanent data loss (databases without backups, buckets
+      without versioning).
+    developer: >
+      These rules catch the Terraform misconfigurations that pass code
+      review because they "work in dev" but cause incidents in production
+      -- firewall rules open to 0.0.0.0/0, Cloud SQL with public IPs,
+      GCS buckets with allUsers access, GKE clusters without private
+      nodes. If it would fail a CIS GCP Benchmark audit or cause a
+      page, there is a rule for it.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/terraform-gcp.yaml
+  tags:
+    vendor: terraform
+    category: infrastructure
+    architecture: [services, workers]
+
+rules:
+  # ── Network security ───────────────────────────────────────────
+
+  - id: tf-gcp-firewall-allow-all
+    name: Firewall rule allows ingress from 0.0.0.0/0
+    description: >
+      Flags google_compute_firewall resources with source_ranges
+      containing 0.0.0.0/0. This makes the associated resource
+      reachable from the entire internet.
+    descriptions:
+      business: >
+        This firewall rule allows traffic from every IP address on the
+        internet. For databases, internal services, and admin interfaces,
+        this is never intentional. It is the most common misconfiguration
+        behind cloud data breaches.
+      developer: >
+        source_ranges = ["0.0.0.0/0"] on an allow rule opens the port
+        to the entire IPv4 space. Restrict to specific CIDR ranges,
+        service accounts, or network tags. Even for public-facing
+        services, prefer a known CIDR range.
+    rationale: >
+      An ingress firewall rule with source_ranges = ["0.0.0.0/0"] is
+      the GCP equivalent of removing the front door. Every IP on the
+      internet can reach the port. CIS GCP Benchmark 3.6 explicitly
+      flags unrestricted ingress. For internal services, use network
+      tags or service account-based rules. For public services, use a
+      load balancer with Cloud Armor instead of direct exposure.
+    severity: error
+    tags: [terraform, gcp, security, networking]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern: |
+          resource "google_compute_firewall" "..." {
+            ...
+            source_ranges = ["0.0.0.0/0"]
+            ...
+          }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Restrict source_ranges to specific CIDR ranges or use network tags.
+      example: |
+        # Before — open to the entire internet
+        resource "google_compute_firewall" "allow_all" {
+          name    = "allow-all"
+          network = google_compute_network.main.name
+
+          allow {
+            protocol = "tcp"
+            ports    = ["443"]
+          }
+
+          source_ranges = ["0.0.0.0/0"]
+        }
+
+        # After — restricted to known CIDR
+        resource "google_compute_firewall" "allow_office" {
+          name    = "allow-office"
+          network = google_compute_network.main.name
+
+          allow {
+            protocol = "tcp"
+            ports    = ["443"]
+          }
+
+          source_ranges = ["10.0.0.0/8"]
+        }
+    references:
+      - https://cloud.google.com/vpc/docs/firewalls
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall
+
+  # ── Database security ──────────────────────────────────────────
+
+  - id: tf-gcp-sql-public-ip
+    name: Cloud SQL instance with public IP enabled
+    description: >
+      Flags google_sql_database_instance resources with ipv4_enabled
+      set to true. The database receives a public IP and is reachable
+      from the internet if authorized networks allow it.
+    descriptions:
+      business: >
+        This database is configured to be directly reachable from the
+        internet. Combined with a weak password or misconfigured
+        authorized networks, anyone can connect to your database.
+        Nearly every database breach involves a publicly accessible
+        endpoint.
+      developer: >
+        ipv4_enabled = true assigns a public IP to the Cloud SQL
+        instance. Even with authorized networks restricting access,
+        a single misconfigured entry exposes the database. Use private
+        IP with VPC peering instead — the database is only reachable
+        from within your VPC.
+    rationale: >
+      A Cloud SQL instance with a public IP is one misconfigured
+      authorized network entry away from being exposed to the internet.
+      Private IP with VPC peering ensures the database is only
+      reachable from within your network. CIS GCP Benchmark 6.6
+      requires Cloud SQL instances to not have public IPs.
+    severity: error
+    tags: [terraform, gcp, security, database]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern: |
+          resource "google_sql_database_instance" "..." {
+            ...
+            settings {
+              ...
+              ip_configuration {
+                ...
+                ipv4_enabled = true
+                ...
+              }
+              ...
+            }
+            ...
+          }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Set ipv4_enabled = false and use private_network for VPC-only access.
+      example: |
+        # Before — database has public IP
+        resource "google_sql_database_instance" "main" {
+          settings {
+            ip_configuration {
+              ipv4_enabled = true
+            }
+          }
+        }
+
+        # After — private IP only
+        resource "google_sql_database_instance" "main" {
+          settings {
+            ip_configuration {
+              ipv4_enabled    = false
+              private_network = google_compute_network.main.id
+            }
+          }
+        }
+    references:
+      - https://cloud.google.com/sql/docs/mysql/configure-private-ip
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/sql_database_instance
+
+  - id: tf-gcp-sql-no-backup
+    name: Cloud SQL instance without automated backups
+    description: >
+      Flags google_sql_database_instance resources without
+      backup_configuration enabled. Without backups, data loss from
+      accidental deletion or corruption is permanent.
+    descriptions:
+      business: >
+        This database has no automated backups. If a developer runs a
+        bad migration or credentials are compromised, the data is gone
+        permanently. Cloud SQL backups are inexpensive — the cost of
+        not having them is catastrophic.
+      developer: >
+        This google_sql_database_instance has no backup_configuration
+        with enabled = true. Without automated backups, there is no
+        point-in-time recovery. Add backup_configuration with enabled
+        = true and a reasonable start_time.
+    rationale: >
+      Without automated backups, a destructive migration, data
+      corruption, or credential compromise results in permanent data
+      loss. Cloud SQL automated backups enable point-in-time recovery
+      to any moment within the retention window. The cost is minimal
+      compared to the cost of losing production data.
+    severity: error
+    tags: [terraform, gcp, reliability, database]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "google_sql_database_instance" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "google_sql_database_instance" "..." {
+                ...
+                settings {
+                  ...
+                  backup_configuration {
+                    ...
+                    enabled = true
+                    ...
+                  }
+                  ...
+                }
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add backup_configuration with enabled = true.
+      example: |
+        # Before — no backups
+        resource "google_sql_database_instance" "main" {
+          settings {
+            tier = "db-f1-micro"
+          }
+        }
+
+        # After — daily backups enabled
+        resource "google_sql_database_instance" "main" {
+          settings {
+            tier = "db-f1-micro"
+            backup_configuration {
+              enabled    = true
+              start_time = "03:00"
+            }
+          }
+        }
+    references:
+      - https://cloud.google.com/sql/docs/mysql/backup-recovery/backups
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/sql_database_instance
+
+  - id: tf-gcp-sql-no-ssl
+    name: Cloud SQL without SSL enforcement
+    description: >
+      Flags google_sql_database_instance resources without
+      require_ssl = true. Without SSL, database connections transmit
+      credentials and data in plain text.
+    descriptions:
+      business: >
+        Database connections without SSL transmit passwords and data
+        unencrypted. Anyone with network access can intercept credentials
+        and read query results. This fails every security audit.
+      developer: >
+        Without require_ssl = true in ip_configuration, Cloud SQL
+        accepts unencrypted connections. Add require_ssl = true to
+        enforce TLS for all client connections.
+    rationale: >
+      Unencrypted database connections expose credentials and data to
+      network-level interception. Even in a VPC, defense in depth
+      requires encryption in transit. CIS GCP Benchmark 6.4 requires
+      SSL for all Cloud SQL connections.
+    severity: error
+    tags: [terraform, gcp, security, database, encryption]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "google_sql_database_instance" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "google_sql_database_instance" "..." {
+                ...
+                settings {
+                  ...
+                  ip_configuration {
+                    ...
+                    require_ssl = true
+                    ...
+                  }
+                  ...
+                }
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Set require_ssl = true in ip_configuration.
+      example: |
+        # Before — unencrypted connections allowed
+        resource "google_sql_database_instance" "main" {
+          settings {
+            ip_configuration {
+              ipv4_enabled = false
+            }
+          }
+        }
+
+        # After — SSL required
+        resource "google_sql_database_instance" "main" {
+          settings {
+            ip_configuration {
+              ipv4_enabled = false
+              require_ssl  = true
+            }
+          }
+        }
+    references:
+      - https://cloud.google.com/sql/docs/mysql/configure-ssl-instance
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/sql_database_instance
+
+  # ── Storage security ───────────────────────────────────────────
+
+  - id: tf-gcp-gcs-no-versioning
+    name: GCS bucket without versioning enabled
+    description: >
+      Flags google_storage_bucket resources without versioning enabled.
+      Without versioning, accidental deletes and overwrites are
+      permanent and unrecoverable.
+    descriptions:
+      business: >
+        Without versioning, a single bad script or misconfigured
+        lifecycle rule can permanently destroy files in this bucket.
+        There is no undo. Versioning keeps a copy of every overwrite
+        and delete so data can be recovered.
+      developer: >
+        This google_storage_bucket has no versioning block with
+        enabled = true. Without versioning, a DeleteObject call
+        permanently destroys the object. Add versioning with lifecycle
+        rules to expire old versions after a retention period.
+    rationale: >
+      GCS versioning is the primary defense against accidental data
+      loss. Without it, a single API call can permanently destroy
+      objects. With versioning, every overwrite and delete creates a
+      recoverable version. Combine with lifecycle rules to expire old
+      versions and control storage costs.
+    severity: warning
+    tags: [terraform, gcp, reliability, storage]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "google_storage_bucket" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "google_storage_bucket" "..." {
+                ...
+                versioning {
+                  ...
+                  enabled = true
+                  ...
+                }
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add versioning { enabled = true } to protect against accidental deletion.
+      example: |
+        # Before — no versioning
+        resource "google_storage_bucket" "data" {
+          name     = "my-data-bucket"
+          location = "US"
+        }
+
+        # After — versioning enabled
+        resource "google_storage_bucket" "data" {
+          name     = "my-data-bucket"
+          location = "US"
+
+          versioning {
+            enabled = true
+          }
+        }
+    references:
+      - https://cloud.google.com/storage/docs/object-versioning
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket
+
+  - id: tf-gcp-gcs-public-acl
+    name: GCS bucket accessible to allUsers
+    description: >
+      Flags google_storage_bucket_iam_member or
+      google_storage_bucket_iam_binding resources that grant access
+      to allUsers or allAuthenticatedUsers.
+    descriptions:
+      business: >
+        This bucket is publicly accessible to anyone on the internet.
+        If it contains customer data, internal documents, or application
+        data, this is a data breach in waiting. Public GCS buckets have
+        caused numerous high-profile data exposures.
+      developer: >
+        Granting a role to allUsers or allAuthenticatedUsers makes the
+        bucket contents publicly downloadable. Use specific service
+        accounts or IAM groups. For public content delivery, serve
+        through a CDN with signed URLs instead.
+    rationale: >
+      allUsers grants access to anyone on the internet without
+      authentication. allAuthenticatedUsers grants access to anyone
+      with a Google account — which is effectively everyone. Both are
+      inappropriate for any bucket containing non-public data. Use
+      specific IAM principals and serve public content through Cloud
+      CDN with signed URLs for access control.
+    severity: error
+    tags: [terraform, gcp, security, storage]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - pattern: |
+              resource "google_storage_bucket_iam_member" "..." {
+                ...
+                member = "allUsers"
+                ...
+              }
+          - pattern: |
+              resource "google_storage_bucket_iam_member" "..." {
+                ...
+                member = "allAuthenticatedUsers"
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Remove allUsers/allAuthenticatedUsers. Use specific IAM principals.
+      example: |
+        # Before — publicly readable
+        resource "google_storage_bucket_iam_member" "public" {
+          bucket = google_storage_bucket.data.name
+          role   = "roles/storage.objectViewer"
+          member = "allUsers"
+        }
+
+        # After — restricted to specific service account
+        resource "google_storage_bucket_iam_member" "app" {
+          bucket = google_storage_bucket.data.name
+          role   = "roles/storage.objectViewer"
+          member = "serviceAccount:${google_service_account.app.email}"
+        }
+    references:
+      - https://cloud.google.com/storage/docs/access-control/iam
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket_iam
+
+  # ── IAM security ───────────────────────────────────────────────
+
+  - id: tf-gcp-iam-admin-role
+    name: IAM binding with Owner or Editor role
+    description: >
+      Flags google_project_iam_member resources that assign
+      roles/owner or roles/editor. These primitive roles grant
+      excessively broad permissions.
+    descriptions:
+      business: >
+        This IAM binding gives unrestricted access to almost every
+        resource in the project. If these credentials are compromised,
+        an attacker can exfiltrate all data, create new admin accounts,
+        and delete everything including audit logs.
+      developer: >
+        roles/owner and roles/editor are primitive roles that grant
+        thousands of permissions across all GCP services. Use predefined
+        roles (roles/storage.admin, roles/cloudsql.editor) scoped to
+        specific services, or create custom roles with minimal
+        permissions.
+    rationale: >
+      GCP primitive roles (Owner, Editor, Viewer) predate IAM and grant
+      permissions across all services. roles/editor alone grants write
+      access to every resource in the project. Google's own security
+      documentation recommends using predefined or custom roles instead.
+      CIS GCP Benchmark 1.4-1.5 explicitly flags primitive role usage.
+    severity: error
+    tags: [terraform, gcp, security, iam]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - pattern: |
+              resource "google_project_iam_member" "..." {
+                ...
+                role = "roles/owner"
+                ...
+              }
+          - pattern: |
+              resource "google_project_iam_member" "..." {
+                ...
+                role = "roles/editor"
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Use predefined or custom roles with minimum required permissions.
+      example: |
+        # Before — full project editor
+        resource "google_project_iam_member" "app" {
+          role   = "roles/editor"
+          member = "serviceAccount:${google_service_account.app.email}"
+        }
+
+        # After — specific role
+        resource "google_project_iam_member" "app_storage" {
+          role   = "roles/storage.objectAdmin"
+          member = "serviceAccount:${google_service_account.app.email}"
+        }
+    references:
+      - https://cloud.google.com/iam/docs/understanding-roles#primitive_roles
+      - https://cloud.google.com/iam/docs/understanding-roles#predefined_roles
+
+  # ── GKE security ───────────────────────────────────────────────
+
+  - id: tf-gcp-gke-no-private-cluster
+    name: GKE cluster without private nodes
+    description: >
+      Flags google_container_cluster resources without
+      private_cluster_config with enable_private_nodes = true. Nodes
+      receive public IPs and are directly reachable from the internet.
+    descriptions:
+      business: >
+        Every node in this Kubernetes cluster has a public IP address.
+        If a container is compromised, the attacker has direct internet
+        access for data exfiltration. Private clusters restrict nodes
+        to internal IPs only.
+      developer: >
+        Without private_cluster_config, GKE nodes get public IPs and
+        can be reached from the internet. Enable private nodes so
+        nodes only have internal IPs. Use Cloud NAT for outbound
+        internet access from pods.
+    rationale: >
+      Public GKE nodes increase the attack surface — a compromised
+      container has direct internet access for C2 communication and
+      data exfiltration. Private clusters restrict nodes to internal
+      IPs, forcing all internet-bound traffic through Cloud NAT where
+      it can be logged and filtered. CIS GKE Benchmark 6.6.4
+      recommends private clusters.
+    severity: warning
+    tags: [terraform, gcp, security, kubernetes]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        patterns:
+          - pattern: |
+              resource "google_container_cluster" "..." {
+                ...
+              }
+          - pattern-not-inside: |
+              resource "google_container_cluster" "..." {
+                ...
+                private_cluster_config {
+                  ...
+                  enable_private_nodes = true
+                  ...
+                }
+                ...
+              }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add private_cluster_config with enable_private_nodes = true.
+      example: |
+        # Before — nodes have public IPs
+        resource "google_container_cluster" "main" {
+          name     = "main"
+          location = "us-central1"
+        }
+
+        # After — private nodes
+        resource "google_container_cluster" "main" {
+          name     = "main"
+          location = "us-central1"
+
+          private_cluster_config {
+            enable_private_nodes    = true
+            enable_private_endpoint = false
+            master_ipv4_cidr_block  = "172.16.0.0/28"
+          }
+        }
+    references:
+      - https://cloud.google.com/kubernetes-engine/docs/concepts/private-cluster-concept
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/container_cluster
+
+  - id: tf-gcp-gke-legacy-abac
+    name: GKE cluster with legacy ABAC enabled
+    description: >
+      Flags google_container_cluster resources with
+      enable_legacy_abac = true. Legacy ABAC grants overly broad
+      permissions and has been superseded by RBAC.
+    descriptions:
+      business: >
+        Legacy ABAC gives every pod in the cluster the ability to access
+        the Kubernetes API with broad permissions. A compromised
+        container can read secrets, modify deployments, and escalate
+        privileges across the entire cluster.
+      developer: >
+        enable_legacy_abac = true enables Attribute-Based Access Control,
+        which is deprecated in favor of RBAC. ABAC grants overly broad
+        API access to all pods. Remove enable_legacy_abac or set it to
+        false and use RBAC (Role/ClusterRole + RoleBinding) instead.
+    rationale: >
+      Legacy ABAC was GKE's original authorization mechanism. It grants
+      broad API permissions to all authenticated entities, including
+      every pod's service account. RBAC provides fine-grained, namespace-
+      scoped permissions. Google deprecated ABAC in favor of RBAC, and
+      CIS GKE Benchmark 5.8.5 requires ABAC to be disabled.
+    severity: error
+    tags: [terraform, gcp, security, kubernetes]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern: |
+          resource "google_container_cluster" "..." {
+            ...
+            enable_legacy_abac = true
+            ...
+          }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Remove enable_legacy_abac or set it to false. Use RBAC instead.
+      example: |
+        # Before — legacy ABAC enabled
+        resource "google_container_cluster" "main" {
+          name               = "main"
+          enable_legacy_abac = true
+        }
+
+        # After — RBAC only (default)
+        resource "google_container_cluster" "main" {
+          name               = "main"
+          enable_legacy_abac = false
+        }
+    references:
+      - https://cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+      - https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/container_cluster
+
+  # ── Governance ─────────────────────────────────────────────────
+
+  - id: tf-gcp-no-labels
+    name: GCP resource without labels
+    description: >
+      Flags common GCP resource types that do not include a labels
+      block. Unlabeled resources are invisible to cost allocation,
+      ownership tracking, and automated governance.
+    descriptions:
+      business: >
+        Without labels, you cannot answer basic questions like "which
+        team owns this?" or "what project is this for?" Unlabeled
+        resources are the primary driver of surprise cloud bills and
+        orphaned infrastructure nobody knows is safe to delete.
+      developer: >
+        This GCP resource has no labels block. Labels are the foundation
+        of GCP governance — billing exports, resource filtering, IAM
+        conditions, and automated cleanup all depend on them. At minimum,
+        add team, environment, and service labels.
+    rationale: >
+      Labels are the foundation of GCP governance. Without them, cost
+      allocation is impossible, ownership is unknown, and automated
+      cleanup tools cannot identify safe-to-delete resources. GCP
+      Organization Policy constraints can enforce required labels, but
+      catching missing labels at Terraform plan time is faster and
+      cheaper than retroactive tagging.
+    severity: warning
+    tags: [terraform, gcp, governance, cost-management]
+    detector:
+      capability: semgrep
+      config:
+        language: hcl
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  resource "google_compute_instance" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "google_compute_instance" "..." {
+                    ...
+                    labels = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "google_storage_bucket" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "google_storage_bucket" "..." {
+                    ...
+                    labels = ...
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  resource "google_sql_database_instance" "..." {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  resource "google_sql_database_instance" "..." {
+                    ...
+                    settings {
+                      ...
+                      user_labels = ...
+                      ...
+                    }
+                    ...
+                  }
+    applies_to: ["**/*.tf"]
+    excludes: []
+    fix:
+      message: Add labels with at least team, environment, and service.
+      example: |
+        # Before — no labels
+        resource "google_compute_instance" "web" {
+          name         = "web-server"
+          machine_type = "e2-medium"
+        }
+
+        # After — properly labeled
+        resource "google_compute_instance" "web" {
+          name         = "web-server"
+          machine_type = "e2-medium"
+
+          labels = {
+            team        = "platform"
+            environment = "production"
+            service     = "api"
+            managed_by  = "terraform"
+          }
+        }
+    references:
+      - https://cloud.google.com/resource-manager/docs/creating-managing-labels
+      - https://cloud.google.com/billing/docs/how-to/export-data-bigquery

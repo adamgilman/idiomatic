@@ -1,0 +1,521 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: py-comment-hygiene
+  name: Python Comment Hygiene
+  version: 0.1.0
+  description: >
+    Comment and documentation hygiene rules for Python projects.
+    Ensures public APIs have docstrings, comments follow conventions,
+    and stale or meaningless comments don't accumulate.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-comment-hygiene.yaml
+
+rules:
+  # ── Docstring completeness ─────────────────────────────────────
+
+  - id: py-public-function-no-docstring
+    name: Public function without docstring
+    description: >
+      Flags public functions (not prefixed with underscore) that have
+      no docstring. PEP 257 requires all public functions to have a
+      docstring describing their behavior, parameters, and return value.
+    descriptions:
+      business: >
+        Functions without documentation are a hidden cost. Every developer
+        who needs to use an undocumented function must read the source code
+        to understand what it does, what it accepts, and what it returns.
+        This slows down onboarding, increases the chance of misuse, and
+        makes your codebase feel like a black box. A brief docstring on
+        every public function eliminates the guesswork and makes your
+        code self-service for consumers.
+      developer: >
+        A public function (name not starting with _) has no docstring.
+        PEP 257 requires all public modules, functions, classes, and
+        methods to have docstrings. Without a docstring, tools like
+        Sphinx, pdoc, and IDE hover tooltips show nothing. The fix is to
+        add a docstring as the first statement of the function body
+        describing what the function does, its parameters, and return
+        value.
+    rationale: >
+      PEP 257 establishes that all public functions must have docstrings.
+      Python's help() builtin, Sphinx documentation generator, and every
+      IDE tooltip rely on docstrings to provide documentation. An
+      undocumented public function forces callers to read implementation
+      code to understand the contract — parameter types, return values,
+      side effects, and error conditions. LLMs frequently generate
+      functions without docstrings, creating documentation debt that
+      compounds as the codebase grows. A single docstring prevents every
+      future consumer from having to reverse-engineer the function.
+    severity: warning
+    tags: [documentation, pep257, docstring]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: |
+              def $FUNC(...):
+                  $FIRST
+                  ...
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^[a-z][a-zA-Z0-9_]*$"
+          - pattern-not: |
+              def $FUNC(...):
+                  "$DOCSTRING"
+                  ...
+          - pattern-not: |
+              def $FUNC(...):
+                  '''...'''
+                  ...
+          - pattern-not-inside: |
+              class $CLS(...):
+                  ...
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/test_*.py"
+      - "**/*_test.py"
+    fix:
+      message: Add a docstring as the first statement of the function body.
+      example: |
+        # Before — no documentation, callers must read the code
+        def process_order(order_id: str, options: dict) -> Result:
+            validated = validate(order_id)
+            return execute(validated, options)
+
+        # After — self-documenting function
+        def process_order(order_id: str, options: dict) -> Result:
+            """Process an order through the validation and execution pipeline.
+
+            Args:
+                order_id: The unique identifier for the order.
+                options: Configuration dict with keys 'priority' and 'notify'.
+
+            Returns:
+                Result with status and any error details.
+
+            Raises:
+                ValueError: If order_id is not a valid UUID.
+            """
+            validated = validate(order_id)
+            return execute(validated, options)
+    references:
+      - https://peps.python.org/pep-0257/
+      - https://google.github.io/styleguide/pyguide.html#383-functions-and-methods
+
+  - id: py-public-class-no-docstring
+    name: Public class without docstring
+    description: >
+      Flags public classes (not prefixed with underscore) that have no
+      docstring. PEP 257 requires all public classes to have a docstring
+      describing their purpose and key attributes.
+    descriptions:
+      business: >
+        A class without a docstring is like a product without a description.
+        Developers who encounter the class in code or documentation cannot
+        tell what it represents, what it's for, or how to use it without
+        reading the full implementation. This slows down every team that
+        depends on your code and increases the chance of incorrect usage
+        that leads to bugs in production.
+      developer: >
+        A public class (name not starting with _) has no docstring. PEP 257
+        requires all public classes to have a docstring describing the
+        class's purpose, key attributes, and usage. Without a docstring,
+        tools like Sphinx, pdoc, and IDE class documentation show nothing.
+        Add a docstring as the first statement of the class body describing
+        what the class represents and its key attributes.
+    rationale: >
+      Classes are the primary abstraction unit in Python. PEP 257 requires
+      all public classes to have docstrings. A class docstring should
+      describe the class's purpose, its key attributes, and any usage
+      constraints. Without it, the class listing in generated documentation
+      shows a blank description, and developers must read __init__ and
+      method implementations to understand what the class is for. LLMs
+      frequently generate dataclasses and model classes without any
+      documentation, even when the class name alone is ambiguous.
+    severity: warning
+    tags: [documentation, pep257, docstring]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: |
+              class $NAME(...):
+                  $FIRST
+                  ...
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: "^[A-Z][a-zA-Z0-9_]*$"
+          - pattern-not: |
+              class $NAME(...):
+                  "$DOCSTRING"
+                  ...
+          - pattern-not: |
+              class $NAME(...):
+                  '''...'''
+                  ...
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/test_*.py"
+      - "**/*_test.py"
+    fix:
+      message: Add a docstring as the first statement of the class body.
+      example: |
+        # Before — no documentation
+        class OrderProcessor:
+            def __init__(self, db: Database, queue: Queue):
+                self.db = db
+                self.queue = queue
+
+        # After — class purpose and attributes documented
+        class OrderProcessor:
+            """Processes orders through validation, payment, and fulfillment stages.
+
+            Attributes:
+                db: Database connection for order persistence.
+                queue: Message queue for async fulfillment dispatch.
+            """
+            def __init__(self, db: Database, queue: Queue):
+                self.db = db
+                self.queue = queue
+    references:
+      - https://peps.python.org/pep-0257/
+      - https://google.github.io/styleguide/pyguide.html#384-classes
+
+  # ── Comment quality ────────────────────────────────────────────
+
+  - id: py-todo-without-issue
+    name: TODO/FIXME comment without tracking reference
+    description: >
+      Flags TODO, FIXME, and HACK comments that lack a tracking reference
+      such as a parenthetical author name, issue number, or ticket link.
+      Unattributed TODOs become permanent fixtures that no one owns.
+    descriptions:
+      business: >
+        TODO comments without a ticket number or owner are promises that
+        no one tracks. They pile up silently — your codebase accumulates
+        hundreds of "TODO: fix this later" notes that never get fixed
+        because they're not in any project backlog. Meanwhile, the issues
+        they describe may be causing real bugs or performance problems.
+        Requiring a tracking reference ensures every TODO has an owner and
+        a path to resolution.
+      developer: >
+        A TODO, FIXME, or HACK comment was written without a tracking
+        reference. The Google Python style guide convention is TODO(username)
+        or TODO(b/123456789) so the comment can be traced to an owner or
+        ticket. Bare TODOs without attribution are invisible to project
+        tracking tools and accumulate indefinitely. Add a parenthetical
+        reference so the item can be found, prioritized, and eventually
+        resolved.
+    rationale: >
+      Bare TODO comments ("# TODO fix this") have no owner, no ticket,
+      and no expiration date. They accumulate in every codebase and become
+      permanent fixtures. The Google Python style guide requires TODO
+      comments to include a name or bug number: "# TODO(crbug.com/192795)".
+      This creates accountability: the author is responsible for either
+      fixing it or filing a ticket, and the reference makes the item
+      discoverable in project tracking. Without this discipline, TODOs
+      are wishful comments that never get done.
+    severity: warning
+    tags: [comment-quality, tracking, maintainability]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-regex: "#\\s*(TODO|FIXME|HACK)(?!\\s*\\()"
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+    fix:
+      message: Add a tracking reference to the TODO comment — author name, issue number, or ticket link.
+      example: |
+        # Before — no owner, no tracking
+        # TODO fix the race condition in process_batch()
+        # FIXME handle the timeout properly
+        # HACK this works but is brittle
+
+        # After — attributed, trackable
+        # TODO(alice) fix the race condition in process_batch()
+        # FIXME(#1234) handle the timeout properly
+        # HACK(PROJ-567) this works but is brittle — will refactor in Q3
+    references:
+      - https://google.github.io/styleguide/pyguide.html#312-todo-comments
+      - https://peps.python.org/pep-0350/
+
+  # ── Lint suppression hygiene ───────────────────────────────────
+
+  - id: py-noqa-without-code
+    name: "noqa suppression without specifying rule code"
+    description: >
+      Flags # noqa comments that suppress linter warnings without
+      specifying which rule is being suppressed. A bare # noqa silences
+      all warnings on the line, hiding real issues alongside the
+      intentional suppression.
+    descriptions:
+      business: >
+        A bare "# noqa" silences every linter warning on the line, not
+        just the one the developer intended. This means real problems —
+        security issues, type errors, unused variables — are silently
+        hidden alongside the one warning the developer wanted to suppress.
+        Over time, bare noqa comments become blind spots where your
+        linter cannot protect you. Requiring a specific rule code ensures
+        only the intended warning is suppressed.
+      developer: >
+        A # noqa comment was used without specifying which rule code to
+        suppress. A bare # noqa silences all flake8/Ruff warnings on the
+        line, which can mask unrelated issues introduced by future edits.
+        The correct pattern is # noqa: E501 (or whatever specific code)
+        so only the intended warning is suppressed and all other checks
+        remain active. This also makes it easy to audit which rules are
+        being suppressed across the codebase.
+    rationale: >
+      A bare # noqa suppresses every linter diagnostic on the line — not
+      just the one the developer intended. If someone later changes the
+      line and introduces a new issue (unused import, security warning,
+      type error), the bare # noqa silences that too. Specifying the rule
+      code (# noqa: E501) limits the suppression to exactly one check,
+      keeping all other protections active. Ruff and flake8 both support
+      code-specific noqa comments. This small discipline prevents noqa
+      from becoming a blanket exemption that undermines the linter.
+    severity: warning
+    tags: [lint-hygiene, maintainability, conventions]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-regex: "#\\s*noqa(?!\\s*:\\s*[A-Z])"
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+    fix:
+      message: Specify which rule code to suppress with # noqa: CODE.
+      example: |
+        # Before — silences ALL warnings on this line
+        long_variable_name = some_function(arg1, arg2, arg3, arg4, arg5, arg6)  # noqa
+
+        # After — silences only the line-length warning
+        long_variable_name = some_function(arg1, arg2, arg3, arg4, arg5, arg6)  # noqa: E501
+    references:
+      - https://docs.astral.sh/ruff/linter/#error-suppression
+      - https://flake8.pycqa.org/en/latest/user/violations.html#in-line-ignoring-errors
+
+  - id: py-type-ignore-without-code
+    name: "type: ignore without specifying error code"
+    description: >
+      Flags # type: ignore comments that suppress mypy errors without
+      specifying which error code is being suppressed. A bare type: ignore
+      silences all type errors on the line, hiding real type safety issues.
+    descriptions:
+      business: >
+        A bare "# type: ignore" silences every type-checking error on the
+        line, not just the one the developer intended. This means real type
+        safety problems — wrong argument types, missing attributes, invalid
+        returns — are silently hidden. Over time, bare type: ignore comments
+        become blind spots where your type checker cannot protect you.
+        Requiring a specific error code ensures only the intended error is
+        suppressed while all other type checks remain active.
+      developer: >
+        A # type: ignore comment was used without specifying which mypy
+        error code to suppress. A bare # type: ignore silences all type
+        errors on the line, which can mask unrelated type issues introduced
+        by future edits. The correct pattern is # type: ignore[attr-defined]
+        so only the specific error is suppressed. This also makes it
+        possible to audit which types of errors are being suppressed across
+        the codebase and address them systematically.
+    rationale: >
+      A bare # type: ignore suppresses every mypy diagnostic on the line.
+      If someone later changes a function signature and introduces a new
+      type error, the bare ignore silences it. Specifying the error code
+      (# type: ignore[attr-defined]) limits the suppression to exactly one
+      check. Mypy 0.900+ supports granular error codes. This small
+      discipline prevents type: ignore from becoming a blanket exemption
+      that undermines your type checking investment. Teams that migrate
+      from bare ignores to coded ignores consistently find real bugs that
+      were silently suppressed.
+    severity: warning
+    tags: [type-safety, lint-hygiene, maintainability]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-regex: "#\\s*type:\\s*ignore(?!\\[)"
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+    fix:
+      message: Specify which mypy error code to suppress with # type: ignore[code].
+      example: |
+        # Before — silences ALL type errors on this line
+        value = untyped_lib.get_value()  # type: ignore
+
+        # After — silences only the missing-attribute error
+        value = untyped_lib.get_value()  # type: ignore[attr-defined]
+    references:
+      - https://mypy.readthedocs.io/en/stable/error_codes.html
+      - https://mypy.readthedocs.io/en/stable/error_codes.html#silencing-errors-based-on-error-codes
+
+  # ── Code cleanliness ───────────────────────────────────────────
+
+  - id: py-commented-out-import
+    name: Commented-out import statement
+    description: >
+      Flags import statements that have been commented out instead of
+      deleted. Commented-out imports are dead code that clutters the
+      file header and signals incomplete refactoring.
+    descriptions:
+      business: >
+        Commented-out code is clutter that makes your codebase harder to
+        read and maintain. Every developer who opens the file must mentally
+        skip over dead imports, wondering whether they're needed or were
+        left by accident. Over time, commented-out imports accumulate and
+        make the file header — the first thing a developer sees — look
+        messy and unmaintained. Version control already preserves history;
+        there is no need to keep dead code in comments.
+      developer: >
+        An import statement was commented out instead of deleted. This is
+        a common pattern during refactoring or debugging, but the commented
+        import should be removed before merging. Version control (git)
+        preserves the full history — if the import is needed later, it can
+        be restored from the commit history. Leaving it commented out adds
+        noise to the file and signals incomplete work. Tools like Ruff and
+        autoflake can remove unused imports automatically.
+    rationale: >
+      Commented-out imports are a form of dead code. They serve no
+      functional purpose and indicate one of two things: the developer
+      was debugging and forgot to clean up, or the developer was unsure
+      whether the import would be needed later. In both cases, the right
+      action is to delete the line. Git preserves history — any deleted
+      import can be recovered from a previous commit. Keeping it as a
+      comment adds visual noise and makes the import section harder to
+      scan at a glance. Ruff rule ERA001 catches this pattern.
+    severity: warning
+    tags: [dead-code, cleanliness, imports]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-regex: "^\\s*#\\s*(import |from \\S+ import )"
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+    fix:
+      message: Delete the commented-out import. Use version control to recover it if needed later.
+      example: |
+        # Before — dead imports cluttering the file header
+        import os
+        # import sys
+        # from pathlib import Path
+        from typing import Optional
+
+        # After — clean import section
+        import os
+        from typing import Optional
+    references:
+      - https://docs.astral.sh/ruff/rules/commented-out-code/
+      - https://google.github.io/styleguide/pyguide.html#313-imports-formatting
+
+  - id: py-empty-docstring
+    name: Empty or whitespace-only docstring
+    description: >
+      Flags functions and classes that have a docstring containing only
+      whitespace, empty quotes, or a placeholder like "pass". An empty
+      docstring is worse than no docstring because it signals that
+      documentation was considered and deliberately left blank.
+    descriptions:
+      business: >
+        An empty docstring is a broken promise. It tells developers that
+        documentation exists for this function, but when they look at it
+        (in an IDE hover, help() output, or Sphinx docs), they find
+        nothing. This is worse than no docstring at all — at least a
+        missing docstring is honest. Empty docstrings waste developers'
+        time by making them click through to read source code after the
+        documentation disappoints them.
+      developer: >
+        A function or class has a docstring that is empty or contains only
+        whitespace. This typically happens when a code template or
+        scaffolding tool generates docstring placeholders that are never
+        filled in, or when a developer adds triple quotes intending to
+        write documentation later. Empty docstrings appear in help()
+        output, IDE hover tooltips, and Sphinx docs as blank entries.
+        Either write a meaningful docstring or remove the empty one.
+    rationale: >
+      An empty docstring (def f():\n    """""") passes PEP 257 checks
+      for docstring presence but provides no value. It's worse than no
+      docstring because it creates a false signal — tools report the
+      function as documented, IDE tooltips show empty hover text, and
+      Sphinx generates blank documentation entries. The developer who
+      sees the empty docstring must still read the implementation to
+      understand the function. Either write a meaningful one-line summary
+      or remove the empty docstring so the lack of documentation is
+      visible to linters and documentation coverage tools.
+    severity: warning
+    tags: [documentation, docstring, cleanliness]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: |
+              def $FUNC(...):
+                  """"""
+                  ...
+          - pattern: |
+              def $FUNC(...):
+                  """   """
+                  ...
+          - pattern: |
+              class $NAME(...):
+                  """"""
+                  ...
+          - pattern: |
+              class $NAME(...):
+                  """   """
+                  ...
+    applies_to:
+      - "**/*.py"
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+    fix:
+      message: Write a meaningful docstring or remove the empty one.
+      example: |
+        # Before — empty docstring, false documentation signal
+        def process_order(order_id: str) -> Result:
+            """"""
+            validated = validate(order_id)
+            return execute(validated)
+
+        # After — meaningful documentation
+        def process_order(order_id: str) -> Result:
+            """Process an order through validation and execution.
+
+            Args:
+                order_id: The unique identifier for the order.
+
+            Returns:
+                Result with status and any error details.
+            """
+            validated = validate(order_id)
+            return execute(validated)
+    references:
+      - https://peps.python.org/pep-0257/
+      - https://google.github.io/styleguide/pyguide.html#383-functions-and-methods

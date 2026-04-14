@@ -1,0 +1,657 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-security
+  name: Go Security
+  version: 0.1.0
+  description: >
+    Principal-level security hardening rules for Go services. Catches
+    credential leaks, authentication bypasses, injection vectors, and
+    cryptographic misuse that lead to security incidents in production.
+  descriptions:
+    business: >
+      Your Go services handle user data, authentication, and sensitive
+      operations. This pack catches the security mistakes that lead to
+      data breaches, unauthorized access, and compliance violations —
+      like SQL injection, hardcoded secrets, and broken authentication.
+      A single one of these vulnerabilities can result in a front-page
+      breach, regulatory fines, and loss of customer trust.
+    developer: >
+      These rules cover the OWASP Top 10 patterns that appear most often
+      in Go codebases — injection via string concatenation, broken
+      crypto primitives, missing auth verification, and insecure
+      defaults in TLS/CORS/cookie config. Each rule targets a specific,
+      exploitable pattern rather than general advice, so the signal-to-noise
+      ratio stays high.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-security.yaml
+  tags:
+    language: go
+    category: security
+    architecture: [services, workers, libraries]
+
+rules:
+  # ── Injection ──────────────────────────────────────────────────
+
+  - id: go-sec-sql-injection
+    name: SQL query built with string concatenation
+    description: >
+      Flags SQL queries built using string concatenation or fmt.Sprintf.
+      This is the most common SQL injection vector.
+    descriptions:
+      business: >
+        This code builds database queries by gluing user input directly
+        into the command text. Think of it like letting a stranger write
+        part of your bank withdrawal slip — they can change the amount,
+        the account number, anything. Without this fix, an attacker can
+        read your entire database, bypass login screens, or delete tables
+        through a web form input.
+      developer: >
+        SQL was built with string concatenation or fmt.Sprintf instead of
+        parameterized queries. What happens is user input becomes part of
+        the SQL syntax — a single quote in the input breaks out of the
+        string context and injects arbitrary SQL. The correct pattern is
+        always using placeholder arguments ($1, ?) which send query
+        structure and data separately, making injection impossible
+        regardless of input content.
+    rationale: >
+      String-interpolated SQL allows an attacker to inject arbitrary SQL
+      by controlling any part of the input. A single unescaped user input
+      can dump your entire database, bypass authentication, or delete
+      tables. Parameterized queries ($1, ?) send the query structure and
+      data separately, making injection impossible regardless of input
+      content. This is OWASP A03:2021 — Injection.
+    severity: error
+    tags: [security, sql-injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $DB.Query($Q + ...)
+          - pattern: $DB.QueryContext($CTX, $Q + ...)
+          - pattern: $DB.Exec($Q + ...)
+          - pattern: $DB.ExecContext($CTX, $Q + ...)
+          - pattern: $DB.QueryRow($Q + ...)
+          - pattern: $DB.QueryRowContext($CTX, $Q + ...)
+          - pattern: $DB.Query(fmt.Sprintf(...))
+          - pattern: $DB.QueryContext($CTX, fmt.Sprintf(...))
+          - pattern: $DB.Exec(fmt.Sprintf(...))
+          - pattern: $DB.ExecContext($CTX, fmt.Sprintf(...))
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use parameterized queries with placeholder arguments instead of string concatenation.
+      example: |
+        // Before — SQL injection
+        db.Query("SELECT * FROM users WHERE id = " + userID)
+        db.Query(fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", name))
+
+        // After — parameterized
+        db.Query("SELECT * FROM users WHERE id = $1", userID)
+        db.Query("SELECT * FROM users WHERE name = $1", name)
+    references:
+      - https://owasp.org/Top10/A03_2021-Injection/
+      - https://go.dev/doc/database/sql-injection
+
+  - id: go-sec-command-injection
+    name: Command execution with potential user input
+    description: >
+      Flags exec.Command usage inside HTTP handlers where user-controlled
+      input could reach the command arguments.
+    descriptions:
+      business: >
+        This code runs operating system commands from within a web
+        request handler, which means user input could potentially
+        control what commands run on your server. Think of it like
+        giving a stranger the keys to your server room and letting
+        them type whatever they want. Without this fix, an attacker
+        could execute arbitrary commands — stealing data, installing
+        malware, or taking over the entire server.
+      developer: >
+        exec.Command was called inside an HTTP handler. What happens is
+        any user-controlled input (query params, headers, body) that
+        reaches the command arguments enables arbitrary command execution
+        on your server. The correct pattern is to avoid exec.Command in
+        handlers entirely — use a Go library instead. If shell-out is
+        unavoidable, validate all arguments against a strict allowlist
+        and never pass raw user input.
+    rationale: >
+      exec.Command in an HTTP handler is a code smell that often leads to
+      command injection. If any part of the command string comes from user
+      input (query params, headers, body), an attacker can execute arbitrary
+      OS commands. Even with argument separation, shell metacharacters in
+      filenames can cause unexpected behavior. This is OWASP A03:2021.
+    severity: error
+    tags: [security, command-injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: exec.Command(...)
+          - pattern-inside: |
+              func $F($W http.ResponseWriter, $R *http.Request) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Avoid exec.Command in HTTP handlers. If necessary, validate and sanitize all arguments against an allowlist.
+      example: |
+        // Before — command injection risk
+        func handler(w http.ResponseWriter, r *http.Request) {
+            file := r.URL.Query().Get("file")
+            cmd := exec.Command("cat", file)
+            output, _ := cmd.Output()
+        }
+
+        // After — allowlist validation
+        func handler(w http.ResponseWriter, r *http.Request) {
+            file := r.URL.Query().Get("file")
+            if !isAllowedFile(file) {
+                http.Error(w, "forbidden", 403)
+                return
+            }
+            data, _ := os.ReadFile(filepath.Join(safeDir, filepath.Base(file)))
+        }
+    references:
+      - https://owasp.org/Top10/A03_2021-Injection/
+
+  - id: go-sec-path-traversal
+    name: User input in file path operations
+    description: >
+      Flags filepath.Join or os.Open/os.ReadFile where request data could
+      be used to construct file paths without sanitization.
+    descriptions:
+      business: >
+        This code uses user input to decide which file to open on the
+        server, without verifying the path is safe. Think of it like
+        letting a visitor choose any room in your building to enter,
+        including the vault. Without this fix, an attacker can read any
+        file on your server — configuration files, private keys,
+        database credentials — by crafting a specially formatted request.
+      developer: >
+        User input was passed to filepath.Join or os.Open/ReadFile inside
+        an HTTP handler without sanitization. What happens is an attacker
+        sends ../../etc/passwd as the filename and filepath.Join does NOT
+        strip traversal sequences — it just concatenates. The correct
+        pattern is always using filepath.Base() to strip directory
+        components from user input, or validating against an explicit
+        allowlist of permitted paths.
+    rationale: >
+      If user input reaches filepath.Join or os.Open without validation,
+      an attacker can use ../ sequences to read any file on the system —
+      /etc/passwd, application configs, private keys. filepath.Join does
+      NOT sanitize path traversal sequences. Use filepath.Base() to strip
+      directory components, or validate against an allowlist of paths.
+    severity: error
+    tags: [security, path-traversal, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: os.Open(filepath.Join(..., $INPUT, ...))
+              - pattern: os.ReadFile(filepath.Join(..., $INPUT, ...))
+              - pattern: os.OpenFile(filepath.Join(..., $INPUT, ...), ...)
+          - pattern-inside: |
+              func $F($W http.ResponseWriter, $R *http.Request) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use filepath.Base() to strip directory components from user input, or validate against an allowlist.
+      example: |
+        // Before — path traversal: ../../etc/passwd
+        func handler(w http.ResponseWriter, r *http.Request) {
+            name := r.URL.Query().Get("file")
+            data, _ := os.ReadFile(filepath.Join("/uploads", name))
+        }
+
+        // After — strip directory components
+        func handler(w http.ResponseWriter, r *http.Request) {
+            name := filepath.Base(r.URL.Query().Get("file"))
+            data, _ := os.ReadFile(filepath.Join("/uploads", name))
+        }
+    references:
+      - https://owasp.org/www-community/attacks/Path_Traversal
+
+  - id: go-sec-template-no-escape
+    name: Using text/template for HTML responses
+    description: >
+      Flags usage of text/template (instead of html/template) in HTTP
+      handler contexts. text/template does not auto-escape HTML output.
+    descriptions:
+      business: >
+        This code renders web pages using a template engine that does not
+        sanitize user content. Think of it like printing customer feedback
+        directly into your website without reviewing it first — an attacker
+        can inject malicious scripts that steal other users' sessions,
+        redirect them to phishing sites, or deface your pages. This is one
+        of the most common web vulnerabilities (XSS).
+      developer: >
+        text/template was used instead of html/template in an HTTP handler
+        context. What happens is template variables are rendered verbatim
+        — any user input containing <script> tags executes as JavaScript
+        in visitors' browsers. The correct pattern is always using
+        html/template, which is a drop-in replacement that auto-escapes
+        output based on context (HTML, JS, CSS, URL attributes).
+    rationale: >
+      text/template renders content verbatim. If any user input reaches
+      a template variable, it will be rendered as raw HTML and JavaScript,
+      enabling XSS attacks. html/template auto-escapes all output based
+      on context (HTML, JS, CSS, URL) and is a drop-in replacement. This
+      is OWASP A03:2021 — Injection (XSS).
+    severity: error
+    tags: [security, xss, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: template.New(...).Parse(...)
+              - pattern: template.Must(template.New(...).Parse(...))
+          - pattern-inside: |
+              func $F($W http.ResponseWriter, $R *http.Request) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use html/template instead of text/template for rendering HTML responses.
+      example: |
+        // Before — XSS via text/template
+        import "text/template"
+        tmpl := template.Must(template.New("page").Parse("<h1>{{.Name}}</h1>"))
+
+        // After — auto-escaped
+        import "html/template"
+        tmpl := template.Must(template.New("page").Parse("<h1>{{.Name}}</h1>"))
+    references:
+      - https://pkg.go.dev/html/template
+      - https://owasp.org/www-community/attacks/xss/
+
+  # ── Cryptography ───────────────────────────────────────────────
+
+  - id: go-sec-weak-hash
+    name: Weak hash algorithm for security
+    description: >
+      Flags usage of MD5 or SHA1 for hashing. These algorithms are
+      cryptographically broken and vulnerable to collision attacks.
+    descriptions:
+      business: >
+        This code uses outdated encryption methods that have been publicly
+        broken. Think of it like using a lock that locksmiths published
+        a YouTube tutorial on how to pick — it looks secure, but anyone
+        with motivation can defeat it. If these weak algorithms protect
+        passwords, signatures, or data integrity checks, an attacker
+        can forge valid-looking data or crack passwords efficiently.
+      developer: >
+        MD5 or SHA1 was used for hashing. MD5 has had practical collision
+        attacks since 2004, and SHA1 was broken by Google's SHAttered
+        attack in 2017. What happens is an attacker can generate two
+        different inputs with the same hash, defeating integrity checks
+        and signature verification. The correct pattern is SHA-256+ for
+        integrity checks and bcrypt/argon2 for password hashing.
+    rationale: >
+      MD5 has been broken since 2004 — practical collision attacks exist.
+      SHA1 was broken by Google's SHAttered attack in 2017. If you use
+      these for password hashing, signature verification, or integrity
+      checks, an attacker can forge collisions. Use SHA-256+ for integrity,
+      bcrypt/argon2 for passwords. MD5 is only acceptable for non-security
+      checksums (file deduplication, cache keys).
+    severity: warning
+    tags: [security, cryptography]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: md5.New()
+          - pattern: md5.Sum(...)
+          - pattern: sha1.New()
+          - pattern: sha1.Sum(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use sha256.New() or sha512.New() for integrity. Use bcrypt or argon2 for passwords.
+      example: |
+        // Before — broken hash
+        h := md5.Sum(data)
+
+        // After — secure hash
+        h := sha256.Sum256(data)
+    references:
+      - https://pkg.go.dev/crypto/sha256
+      - https://shattered.io/
+
+  - id: go-sec-rand-not-crypto
+    name: math/rand used for security-sensitive values
+    description: >
+      Flags math/rand usage for generating tokens, keys, nonces, or
+      session IDs. math/rand is predictable and not suitable for security.
+    descriptions:
+      business: >
+        This code generates security tokens (like session IDs or API keys)
+        using a predictable random number generator. Think of it like
+        numbering your house keys sequentially — if someone knows the
+        pattern, they can predict the next key. Without this fix, an
+        attacker can predict future tokens and impersonate users, forge
+        API keys, or bypass password reset flows.
+      developer: >
+        math/rand was used for security-sensitive random values. What
+        happens is the PRNG is deterministic — if an attacker knows or
+        guesses the seed (which defaults to a fixed value pre-Go 1.20),
+        they can predict every future output and forge tokens. The correct
+        pattern is always using crypto/rand for session tokens, API keys,
+        CSRF tokens, nonces, and any value where predictability is a
+        security risk.
+    rationale: >
+      math/rand uses a deterministic PRNG. If an attacker knows or can
+      guess the seed (which defaults to a fixed value pre-Go 1.20), they
+      can predict every future output. Session tokens, API keys, CSRF
+      tokens, and password reset tokens generated with math/rand can be
+      predicted and forged. Use crypto/rand for all security-sensitive
+      random values.
+    severity: warning
+    tags: [security, randomness, cryptography]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: rand.Int()
+          - pattern: rand.Intn(...)
+          - pattern: rand.Int63()
+          - pattern: rand.Int63n(...)
+          - pattern: rand.Uint32()
+          - pattern: rand.Float64()
+          - pattern: rand.Read(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use crypto/rand for security-sensitive random values.
+      example: |
+        // Before — predictable
+        token := fmt.Sprintf("%d", rand.Int63())
+
+        // After — cryptographically secure
+        b := make([]byte, 32)
+        crypto_rand.Read(b)
+        token := base64.URLEncoding.EncodeToString(b)
+    references:
+      - https://pkg.go.dev/crypto/rand
+      - https://owasp.org/www-community/vulnerabilities/Insecure_Randomness
+
+  # ── Authentication ─────────────────────────────────────────────
+
+  - id: go-sec-jwt-parse-unverified
+    name: JWT parsed without signature verification
+    description: >
+      Flags usage of jwt.ParseUnverified or jwt.Parse without a key
+      function. Tokens are accepted without checking their signature.
+    descriptions:
+      business: >
+        This code accepts login tokens without verifying they are genuine.
+        Think of it like a bouncer who checks that an ID card has a name
+        on it but never checks the hologram or photo. Without this fix,
+        anyone can forge a login token claiming to be any user — including
+        administrators — and your authentication system will accept it.
+        This is a complete authentication bypass.
+      developer: >
+        jwt.ParseUnverified or jwt.Parse without a key function was used.
+        What happens is the JWT signature is never checked — an attacker
+        can craft a token with arbitrary claims (admin: true, user_id:
+        anything) and it will be accepted as valid. The correct pattern
+        is always using jwt.Parse with a key function that validates the
+        signing method and returns the verification key.
+    rationale: >
+      ParseUnverified explicitly skips signature verification — any
+      attacker can forge a token with arbitrary claims. jwt.Parse without
+      a key function also skips verification. This means your entire
+      authentication layer is a no-op — anyone can impersonate any user
+      by crafting a JWT with the desired claims.
+    severity: error
+    tags: [security, jwt, authentication]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: jwt.ParseUnverified(...)
+          - pattern: jwt.Parse($TOKEN)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use jwt.Parse with a key function that verifies the signature.
+      example: |
+        // Before — signature not verified
+        token, _ := jwt.ParseUnverified(tokenString, &jwt.MapClaims{})
+
+        // After — signature verified
+        token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+            if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+                return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+            }
+            return []byte(os.Getenv("JWT_SECRET")), nil
+        })
+    references:
+      - https://pkg.go.dev/github.com/golang-jwt/jwt/v5
+
+  - id: go-sec-hardcoded-jwt-secret
+    name: JWT signing key as string literal
+    description: >
+      Flags JWT signing operations where the key is a hardcoded string
+      literal in source code.
+    descriptions:
+      business: >
+        This code has the secret key used to sign login tokens written
+        directly in the source code. Think of it like posting the master
+        password for your entire authentication system in a document that
+        every developer (and potentially the public) can read. Anyone with
+        access to the code can forge login tokens for any user, including
+        administrators, with no way to detect the forgery.
+      developer: >
+        The JWT signing key is a string literal in source code. What
+        happens is the key ends up in git history permanently — even after
+        rotation, the old key is recoverable from commit history. The
+        correct pattern is always loading signing keys from environment
+        variables, a secret store (Vault, AWS Secrets Manager), or a key
+        management service at runtime.
+    rationale: >
+      A hardcoded JWT secret in source code means anyone with repository
+      access can forge valid tokens for any user. The secret ends up in
+      git history permanently — even if you rotate it, the old secret
+      is still in the commit log. Load signing keys from environment
+      variables, a secret store (Vault, AWS Secrets Manager), or a
+      key management service.
+    severity: error
+    tags: [security, jwt, secrets]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: jwt.NewWithClaims($METHOD, $CLAIMS).SignedString([]byte("..."))
+          - pattern: $TOKEN.SignedString([]byte("..."))
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Load JWT signing keys from environment variables or a secret store.
+      example: |
+        // Before — secret in source code
+        tokenString, _ := token.SignedString([]byte("my-secret-key"))
+
+        // After
+        tokenString, _ := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+    references:
+      - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens
+
+  # ── HTTP Security ──────────────────────────────────────────────
+
+  - id: go-sec-cors-wildcard
+    name: CORS wildcard origin
+    description: >
+      Flags CORS configuration with wildcard "*" origin. Allows any
+      website to make authenticated cross-origin requests.
+    descriptions:
+      business: >
+        This code allows any website on the internet to make requests to
+        your API on behalf of your logged-in users. Think of it like
+        putting a sign on your office door that says "anyone can enter
+        and use any employee's computer." Without this fix, a malicious
+        website can silently read your users' data by making requests
+        to your API using their active session.
+      developer: >
+        Access-Control-Allow-Origin was set to "*". What happens is any
+        origin can make cross-origin requests to your API, and combined
+        with Allow-Credentials, the browser will include cookies —
+        enabling cross-site request forgery where an attacker's page
+        reads authenticated responses. The correct pattern is always
+        restricting origins to an explicit allowlist of your own domains
+        and validating the Origin header against it.
+    rationale: >
+      Access-Control-Allow-Origin: * means any website can read responses
+      from your API. Combined with Access-Control-Allow-Credentials, this
+      allows cross-site request forgery where an attacker's page makes
+      authenticated requests to your API and reads the responses. Restrict
+      origins to your own domains.
+    severity: warning
+    tags: [security, cors, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $W.Header().Set("Access-Control-Allow-Origin", "*")
+          - pattern: $W.Header().Add("Access-Control-Allow-Origin", "*")
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Restrict CORS origins to specific trusted domains instead of wildcard.
+      example: |
+        // Before — any website can make requests
+        w.Header().Set("Access-Control-Allow-Origin", "*")
+
+        // After — only trusted origins
+        origin := r.Header.Get("Origin")
+        if isAllowedOrigin(origin) {
+            w.Header().Set("Access-Control-Allow-Origin", origin)
+        }
+    references:
+      - https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny
+
+  - id: go-sec-cookie-no-flags
+    name: Cookie without security flags
+    description: >
+      Flags http.Cookie creation without HttpOnly flag set to true.
+      Cookies are accessible to JavaScript and vulnerable to XSS theft.
+    descriptions:
+      business: >
+        This code creates login cookies without the security protections
+        that modern browsers support. Think of it like issuing employee
+        badges that anyone can photocopy. Without these flags, any
+        cross-site scripting vulnerability on your site lets an attacker
+        steal user sessions, and cookies can be intercepted over
+        unencrypted connections. This turns a minor XSS bug into a full
+        account takeover.
+      developer: >
+        http.Cookie was created without HttpOnly set to true. What happens
+        is the cookie is accessible via document.cookie in JavaScript —
+        any XSS vulnerability becomes a session theft vulnerability. The
+        correct pattern is always setting HttpOnly: true (prevents JS
+        access), Secure: true (HTTPS only), and SameSite: Strict or Lax
+        (prevents CSRF) on all authentication cookies.
+    rationale: >
+      Without HttpOnly, any XSS vulnerability on your site allows an
+      attacker to steal session cookies via document.cookie. Without
+      Secure, cookies are sent over plain HTTP and can be intercepted.
+      Without SameSite, cookies are sent on cross-origin requests,
+      enabling CSRF. Always set all three flags on authentication cookies.
+    severity: warning
+    tags: [security, cookies, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              &http.Cookie{...}
+          - pattern-not: |
+              &http.Cookie{..., HttpOnly: true, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Set HttpOnly, Secure, and SameSite flags on cookies.
+      example: |
+        // Before — vulnerable to XSS cookie theft
+        http.SetCookie(w, &http.Cookie{
+            Name:  "session",
+            Value: token,
+        })
+
+        // After
+        http.SetCookie(w, &http.Cookie{
+            Name:     "session",
+            Value:    token,
+            HttpOnly: true,
+            Secure:   true,
+            SameSite: http.SameSiteStrictMode,
+        })
+    references:
+      - https://owasp.org/www-community/HttpOnly
+
+  - id: go-sec-tls-min-version
+    name: TLS config without minimum version
+    description: >
+      Flags tls.Config without MinVersion set. The default allows TLS 1.0
+      which has known vulnerabilities (BEAST, POODLE).
+    descriptions:
+      business: >
+        This code allows connections using outdated encryption protocols
+        that have known security holes. Think of it like accepting checks
+        with no security watermark — they might be valid, but they are
+        trivially forgeable. Without this fix, your service fails PCI DSS
+        compliance audits, and attackers can potentially intercept
+        encrypted traffic using well-documented attacks against TLS 1.0
+        and 1.1.
+      developer: >
+        tls.Config was created without MinVersion set. What happens is
+        the server accepts TLS 1.0 and 1.1 connections, which are
+        vulnerable to BEAST, POODLE, and other protocol-level attacks.
+        TLS 1.0/1.1 are deprecated by RFC 8996. The correct pattern is
+        always setting MinVersion to tls.VersionTLS12 at minimum, or
+        tls.VersionTLS13 if all your clients support it.
+    rationale: >
+      TLS 1.0 and 1.1 are deprecated by RFC 8996. PCI DSS requires TLS
+      1.2 minimum. Without setting MinVersion, your server accepts
+      connections from clients using broken protocol versions. Set
+      MinVersion to tls.VersionTLS12 at minimum, or tls.VersionTLS13
+      if your clients support it.
+    severity: warning
+    tags: [security, tls, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              &tls.Config{...}
+          - pattern-not: |
+              &tls.Config{..., MinVersion: $V, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Set MinVersion to tls.VersionTLS12 or tls.VersionTLS13.
+      example: |
+        // Before — accepts TLS 1.0
+        tlsConfig := &tls.Config{}
+
+        // After
+        tlsConfig := &tls.Config{
+            MinVersion: tls.VersionTLS12,
+        }
+    references:
+      - https://pkg.go.dev/crypto/tls#Config
+      - https://datatracker.ietf.org/doc/rfc8996/

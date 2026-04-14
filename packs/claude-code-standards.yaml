@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: claude-code-standards
+  name: Claude Code Standards
+  version: 0.1.0
+  description: >
+    Enforces Claude Code-specific project conventions. Currently
+    checks that a CLAUDE.md file is present at the repository
+    root so Claude Code sessions have access to project
+    instructions. For generic AI workflow hygiene (worktrees,
+    branch protection, .gitignore), see the ai-workflow pack.
+  descriptions:
+    business: >
+      Claude Code reads project-specific instructions from
+      CLAUDE.md at session start. Without it, the assistant lacks
+      context about your team's conventions, architecture, and
+      workflows, leading to inconsistent output that requires more
+      review cycles. This pack ensures every repo that uses
+      Claude Code has the configuration it needs to produce
+      high-quality results from day one.
+    developer: >
+      This pack uses the repocheck capability to verify
+      Claude Code-specific project configuration. Rules here are
+      specific to Claude Code features (CLAUDE.md, hooks, etc.),
+      not general AI workflow hygiene.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/claude-code-standards.yaml
+  tags:
+    category: workflow
+    vendor: claude-code
+    architecture: [services, workers, pipelines, libraries, serverless]
+
+rules:
+  - id: require-claude-md
+    name: Require CLAUDE.md project instructions
+    description: >
+      Checks that a CLAUDE.md file exists at the repository root,
+      providing project-specific instructions for Claude Code sessions.
+    descriptions:
+      business: >
+        Without a CLAUDE.md file, Claude Code lacks project-specific
+        context — coding standards, architectural decisions, deployment
+        patterns, and team conventions. This leads to inconsistent code
+        that doesn't match your team's practices and requires more review
+        cycles to correct.
+      developer: >
+        CLAUDE.md is read automatically by Claude Code at session start.
+        It should contain: build commands, test commands, coding conventions,
+        architecture overview, and any project-specific constraints that
+        the assistant should follow.
+    rationale: >
+      CLAUDE.md provides project-specific instructions that Claude Code
+      reads at session start. Without it, the assistant lacks context
+      about your team's conventions, architecture, and workflows,
+      leading to inconsistent output that requires more review.
+    severity: warning
+    tags: [config, documentation, claude-code]
+    detector:
+      capability: file-exists
+      config:
+        path: CLAUDE.md
+        fire_when: 'signal.exit_code != 0'
+    applies_to: ["**/*"]
+    excludes: ["**/vendor/**", "**/node_modules/**", "**/.git/**"]
+    fix:
+      message: Create a CLAUDE.md file at the repository root with project instructions.
+      example: |
+        # CLAUDE.md
+
+        ## Build & Test
+        npm test        # run tests
+        npm run build   # build the project
+
+        ## Conventions
+        - Use TypeScript strict mode
+        - Prefer functional components with hooks
+    references:
+      - https://docs.anthropic.com/en/docs/claude-code

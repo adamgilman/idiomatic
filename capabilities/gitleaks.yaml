@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: gitleaks
+  version: 1.0.0
+  description: Secret scanner — runs gitleaks per file and matches built-in rule IDs back to pack rules
+
+spec:
+  # Secret detection applies to every file regardless of extension.
+  applies_to_files:
+
+  requires:
+    binary: gitleaks
+    install: "go install github.com/gitleaks/gitleaks/v8@latest"
+
+  inputs:
+    rule_id:
+      type: string
+      required: true
+      description: gitleaks built-in rule ID (e.g. aws-access-token, github-pat)
+
+  run:
+    per: file
+    argv:
+      - detect
+      - --no-git
+      - --report-format
+      - json
+      - --report-path
+      - "{report_path}"
+      - --log-level
+      - error
+      - --source
+      - "{{ .File }}"
+    timeout: 60s
+    ok_exit: [1]
+    output: report_file
+    report_path_pattern: "{tmp}/idio-gitleaks.json"
+
+  signal:
+    shape: list
+    source: stdout
+    format: json
+    list: ""              # gitleaks reports are a top-level JSON array
+    match_rule_by:
+      strategy: by_input
+      field: rule_id
+      from: RuleID
+    fields:
+      file: File
+      line: StartLine
+      col: StartColumn
+      end_line: EndLine
+      end_col: EndColumn
+      message: Description

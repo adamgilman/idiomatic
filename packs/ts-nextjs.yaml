@@ -1,0 +1,568 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ts-nextjs
+  name: TypeScript Next.js
+  version: 0.1.0
+  description: >
+    Principal-level Next.js rules for TypeScript applications. Catches
+    server/client component misuse, data fetching anti-patterns, missing
+    error boundaries, and performance pitfalls in the App Router.
+  descriptions:
+    business: >
+      Your Next.js app is the face of your product. This pack catches the
+      mistakes that make pages slow, break SEO, expose internal data, and
+      create security holes — like fetching data on the client when the
+      server could do it faster, or accepting user input without validation
+      in server actions that are publicly callable endpoints.
+    developer: >
+      Next.js App Router changes the mental model — server components,
+      server actions, and streaming require new patterns. These rules catch
+      client-side data fetching that should be server-side, unvalidated
+      server actions, redirect() in try/catch, and missing cache
+      configuration on fetch calls.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-nextjs.yaml
+  tags:
+    language: typescript
+    framework: nextjs
+    category: http
+    architecture: [services]
+
+rules:
+  # ── Data fetching ──────────────────────────────────────────────
+
+  - id: ts-nextjs-client-data-fetch
+    name: Client-side data fetching with useEffect
+    description: >
+      Flags useEffect + fetch pattern for data loading. In the App Router,
+      data should be fetched in server components for better performance.
+    descriptions:
+      business: >
+        This page fetches data after it loads in the user's browser instead
+        of on the server. Users see a loading spinner while the browser
+        makes an extra round trip. Server components can fetch data during
+        rendering, eliminating the spinner and delivering content faster.
+      developer: >
+        useEffect + fetch is the React SPA pattern. In Next.js App Router,
+        server components can fetch directly — no loading state, no
+        waterfall, no client bundle bloat. Move data fetching to a server
+        component or use a server action.
+    rationale: >
+      The useEffect + fetch pattern causes a client-side waterfall: the
+      page renders empty, JavaScript loads, then fetch fires. The user
+      sees a loading spinner for every data-dependent component. Server
+      components fetch data during SSR/streaming, eliminating the round
+      trip and delivering content in the initial HTML. This also reduces
+      the client JavaScript bundle since fetch code stays on the server.
+    severity: warning
+    tags: [nextjs, data-fetching, performance]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: |
+          useEffect(() => {
+            ...
+            fetch(...)
+            ...
+          }, ...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Move data fetching to a server component or use a server action instead of useEffect + fetch.
+      example: |
+        // Before — client-side waterfall
+        "use client";
+        export default function Users() {
+          const [users, setUsers] = useState([]);
+          useEffect(() => {
+            fetch("/api/users").then(r => r.json()).then(setUsers);
+          }, []);
+          return <UserList users={users} />;
+        }
+
+        // After — server component, no loading spinner
+        export default async function Users() {
+          const users = await db.users.findMany();
+          return <UserList users={users} />;
+        }
+    references:
+      - https://nextjs.org/docs/app/building-your-application/data-fetching
+
+  - id: ts-nextjs-no-image-component
+    name: Using img tag instead of next/image
+    description: >
+      Flags HTML img tags in Next.js components. next/image provides
+      automatic optimization, lazy loading, and format conversion.
+    descriptions:
+      business: >
+        Images are being served without optimization, which means larger
+        file sizes, slower page loads, and worse Core Web Vitals scores.
+        Next.js has a built-in image optimizer that automatically resizes,
+        compresses, and lazy-loads images — using raw img tags throws
+        that away.
+      developer: >
+        next/image handles srcset generation, lazy loading, format
+        conversion (WebP/AVIF), and prevents layout shift with automatic
+        sizing. Raw <img> tags skip all of this. The only exception is
+        SVGs or data URIs where optimization doesn't apply.
+    rationale: >
+      The next/image component provides automatic image optimization:
+      responsive srcset generation, lazy loading, modern format conversion
+      (WebP, AVIF), and layout shift prevention via width/height. Raw
+      img tags deliver unoptimized images at full resolution, hurting
+      Core Web Vitals (LCP, CLS) and increasing bandwidth costs. Google
+      uses Core Web Vitals as a ranking signal, so unoptimized images
+      directly impact SEO.
+    severity: warning
+    tags: [nextjs, images, performance, seo]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: <img src={...} />
+    applies_to: ["**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Use next/image instead of img for automatic optimization and lazy loading.
+      example: |
+        // Before — unoptimized, no lazy loading
+        <img src="/hero.jpg" alt="Hero" />
+
+        // After — optimized, lazy loaded, responsive
+        import Image from "next/image";
+        <Image src="/hero.jpg" alt="Hero" width={800} height={400} />
+    references:
+      - https://nextjs.org/docs/app/building-your-application/optimizing/images
+
+  # ── Server actions ─────────────────────────────────────────────
+
+  - id: ts-nextjs-server-action-no-validation
+    name: Server action without input validation
+    description: >
+      Flags "use server" functions that use their parameters without
+      validation. Server actions are publicly callable HTTP endpoints.
+    descriptions:
+      business: >
+        This server function accepts data from the browser without checking
+        it first. Server actions are publicly accessible endpoints —
+        anyone can call them with any data, not just your UI. Without
+        validation, attackers can send malicious input to manipulate your
+        database, bypass business rules, or crash the service.
+      developer: >
+        "use server" functions are exposed as POST endpoints. The form data
+        arrives as raw FormData or plain arguments — there's no automatic
+        validation. Always validate with zod, valibot, or similar before
+        using the data. Treat server action inputs exactly like API
+        request bodies.
+    rationale: >
+      Server actions annotated with "use server" are serialized as HTTP
+      POST endpoints. Any client can call them directly with arbitrary
+      payloads — they are not restricted to your UI. Without input
+      validation, attackers can submit malformed data that bypasses
+      client-side checks, corrupts database state, or triggers unexpected
+      errors. Always validate server action inputs with a schema
+      validation library (zod, valibot, io-ts) before using them.
+    severity: warning
+    tags: [nextjs, server-actions, security, validation]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: |
+              async function $FUNC($PARAMS) {
+                "use server";
+                ...
+              }
+          - pattern-not-inside: |
+              async function $FUNC($PARAMS) {
+                "use server";
+                ...
+                $SCHEMA.parse(...)
+                ...
+              }
+          - pattern-not-inside: |
+              async function $FUNC($PARAMS) {
+                "use server";
+                ...
+                $SCHEMA.safeParse(...)
+                ...
+              }
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Validate server action inputs with zod or similar before using them.
+      example: |
+        // Before — no validation, anyone can submit anything
+        async function createUser(data: FormData) {
+          "use server";
+          const name = data.get("name") as string;
+          await db.users.create({ name });
+        }
+
+        // After — validated
+        const schema = z.object({ name: z.string().min(1).max(100) });
+
+        async function createUser(data: FormData) {
+          "use server";
+          const { name } = schema.parse(Object.fromEntries(data));
+          await db.users.create({ name });
+        }
+    references:
+      - https://nextjs.org/docs/app/building-your-application/data-fetching/server-actions-and-mutations
+
+  # ── Navigation ─────────────────────────────────────────────────
+
+  - id: ts-nextjs-redirect-in-try-catch
+    name: redirect() inside try/catch block
+    description: >
+      Flags next/navigation redirect() called inside a try/catch block.
+      redirect() throws a special error that must not be caught.
+    descriptions:
+      business: >
+        This code catches an internal signal that Next.js uses to redirect
+        users to another page. The redirect silently fails, and users see
+        the wrong page or an error instead of being sent where they should
+        go. It's like intercepting a forwarding notice at the post office.
+      developer: >
+        redirect() works by throwing a NEXT_REDIRECT error internally.
+        If it's inside a try/catch, the catch block swallows it and the
+        redirect never happens. Move redirect() outside the try/catch,
+        or re-throw the error if it's a redirect.
+    rationale: >
+      Next.js redirect() throws a special NEXT_REDIRECT error that the
+      framework catches at a higher level to perform the redirect. If
+      redirect() is called inside a try/catch, the catch block intercepts
+      this special error and the redirect never happens. The user sees
+      whatever the catch block renders instead of being redirected. This
+      is a common Next.js gotcha that causes silent navigation failures.
+    severity: error
+    tags: [nextjs, navigation, redirect]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: |
+          try {
+            ...
+            redirect(...)
+            ...
+          } catch ($ERR) {
+            ...
+          }
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Move redirect() outside the try/catch, or re-throw NEXT_REDIRECT errors.
+      example: |
+        // Before — redirect silently swallowed
+        try {
+          await saveData(data);
+          redirect("/success");
+        } catch (err) {
+          return { error: "Failed to save" };
+        }
+
+        // After — redirect outside try/catch
+        let saved = false;
+        try {
+          await saveData(data);
+          saved = true;
+        } catch (err) {
+          return { error: "Failed to save" };
+        }
+        if (saved) redirect("/success");
+    references:
+      - https://nextjs.org/docs/app/api-reference/functions/redirect
+
+  # ── Environment variables ──────────────────────────────────────
+
+  - id: ts-nextjs-env-client-exposure
+    name: Non-public env var accessed in client component
+    description: >
+      Flags process.env access without NEXT_PUBLIC_ prefix in files
+      that have "use client" directive. The value will be undefined.
+    descriptions:
+      business: >
+        This code tries to read a configuration value that isn't available
+        in the browser. The value will silently be empty, causing features
+        to break — API calls go nowhere, analytics don't track, and
+        third-party integrations fail. Users see broken functionality
+        with no error message.
+      developer: >
+        Next.js only exposes env vars prefixed with NEXT_PUBLIC_ to client
+        bundles. process.env.SECRET_KEY in a "use client" component is
+        undefined at runtime — it's not a build error, it's a silent
+        undefined. Either add the NEXT_PUBLIC_ prefix or move the env
+        access to a server component.
+    rationale: >
+      Next.js inlines environment variables at build time, but only
+      variables prefixed with NEXT_PUBLIC_ are included in the client
+      bundle. Accessing process.env.MY_VAR in a client component returns
+      undefined — it compiles without error but fails silently at runtime.
+      This commonly manifests as API calls with undefined base URLs,
+      broken analytics, or authentication failures that only occur in
+      production builds (development mode may expose all env vars).
+    severity: error
+    tags: [nextjs, environment, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: process.env.$VAR
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: "^(?!NEXT_PUBLIC_).*"
+          - pattern-inside: |
+              "use client";
+              ...
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Add NEXT_PUBLIC_ prefix to expose the env var to client code, or move access to a server component.
+      example: |
+        // Before — undefined in browser
+        "use client";
+        const apiUrl = process.env.API_URL;  // undefined!
+
+        // After — option 1: make it public
+        "use client";
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+        // After — option 2: pass from server component
+        // page.tsx (server component)
+        export default function Page() {
+          return <Client apiUrl={process.env.API_URL!} />;
+        }
+    references:
+      - https://nextjs.org/docs/app/building-your-application/configuring/environment-variables
+
+  # ── Dynamic imports ────────────────────────────────────────────
+
+  - id: ts-nextjs-dynamic-no-loading
+    name: Dynamic import without loading component
+    description: >
+      Flags next/dynamic imports without a loading component. Users see
+      nothing while the component loads.
+    descriptions:
+      business: >
+        This code loads a component on demand to speed up initial page
+        load, but shows nothing while it loads. Users see a blank gap
+        or a layout jump when the component finally appears. Adding a
+        loading placeholder gives users instant feedback that content
+        is coming.
+      developer: >
+        next/dynamic without a loading prop shows nothing during chunk
+        download. On slow connections this creates a visible hole in the
+        UI that jumps when the component mounts, hurting CLS. Always
+        provide a loading skeleton or spinner.
+    rationale: >
+      Dynamic imports defer component loading to reduce the initial
+      JavaScript bundle. But without a loading fallback, the component's
+      spot is empty until the chunk downloads, parses, and renders. On
+      slow connections, this creates a noticeable blank space followed by
+      a layout shift when the component appears — directly impacting
+      Cumulative Layout Shift (CLS), a Core Web Vital that affects
+      Google search ranking.
+    severity: warning
+    tags: [nextjs, dynamic-import, performance, ux]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: dynamic(() => import(...))
+          - pattern-not: "dynamic(() => import(...), { ..., loading: $L, ... })"
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Add a loading component to next/dynamic to prevent layout shift.
+      example: |
+        // Before — blank space while loading
+        const Chart = dynamic(() => import("./Chart"));
+
+        // After — skeleton shown immediately
+        const Chart = dynamic(() => import("./Chart"), {
+          loading: () => <ChartSkeleton />,
+        });
+    references:
+      - https://nextjs.org/docs/app/building-your-application/optimizing/lazy-loading
+
+  # ── Caching ────────────────────────────────────────────────────
+
+  - id: ts-nextjs-fetch-no-cache-config
+    name: Server component fetch without cache configuration
+    description: >
+      Flags fetch() calls in server components without explicit cache
+      or next.revalidate options. Default caching behavior changed
+      between Next.js versions.
+    descriptions:
+      business: >
+        This data fetch doesn't specify how long results should be cached.
+        Depending on the Next.js version, this either serves stale data
+        for too long (users see outdated content) or never caches at all
+        (every page load hits the database). Being explicit about caching
+        prevents surprises.
+      developer: >
+        Next.js 14 defaulted to cache: "force-cache", Next.js 15 changed
+        to cache: "no-store". Without explicit config, upgrading Next.js
+        silently changes your caching behavior. Always specify
+        cache: "no-store" or next: { revalidate: N } to make intent clear.
+    rationale: >
+      Next.js extended the fetch API with caching options, but the
+      defaults changed between major versions. In Next.js 14,
+      fetch defaults to force-cache (cached forever). In Next.js 15,
+      it defaults to no-store (never cached). Code without explicit
+      cache configuration will behave differently after a framework
+      upgrade, potentially serving stale data or losing caching entirely.
+      Always specify the caching strategy explicitly.
+    severity: info
+    tags: [nextjs, caching, data-fetching]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: fetch($URL)
+          - pattern-not: "fetch($URL, { ..., cache: $C, ... })"
+          - pattern-not: "fetch($URL, { ..., next: { ..., revalidate: $R, ... }, ... })"
+          - pattern-not-inside: |
+              "use client";
+              ...
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Add explicit cache or next.revalidate option to fetch calls in server components.
+      example: |
+        // Before — caching behavior depends on Next.js version
+        const data = await fetch("https://api.example.com/products");
+
+        // After — explicit: revalidate every 60 seconds
+        const data = await fetch("https://api.example.com/products", {
+          next: { revalidate: 60 },
+        });
+
+        // Or — explicit: never cache
+        const data = await fetch("https://api.example.com/products", {
+          cache: "no-store",
+        });
+    references:
+      - https://nextjs.org/docs/app/building-your-application/caching
+
+  # ── API routes ─────────────────────────────────────────────────
+
+  - id: ts-nextjs-api-route-no-method-check
+    name: API route without HTTP method check
+    description: >
+      Flags Pages Router API route handlers that don't check req.method.
+      All HTTP methods (GET, POST, DELETE, etc.) are accepted.
+    descriptions:
+      business: >
+        This API endpoint accepts any type of request — reads, writes,
+        and deletes all go through the same handler. It's like having a
+        single door for both customers and delivery trucks. Attackers
+        can send DELETE requests to an endpoint that should only accept
+        GET, potentially modifying or destroying data.
+      developer: >
+        Pages Router API routes receive all HTTP methods. Without checking
+        req.method, a handler meant for GET also accepts POST/DELETE/PUT.
+        Either check req.method and return 405 for unsupported methods,
+        or migrate to App Router's route.ts which exports named handlers
+        (GET, POST, etc.).
+    rationale: >
+      Pages Router API routes (pages/api/*.ts) receive all HTTP methods
+      through a single handler function. Without checking req.method, a
+      data-reading endpoint also accepts POST, PUT, and DELETE requests.
+      This can lead to unintended side effects if the handler writes to
+      a database, or create security issues if the handler is meant to
+      be read-only. App Router route handlers (app/api/*/route.ts) solve
+      this by exporting separate functions per method.
+    severity: warning
+    tags: [nextjs, api, security]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: |
+              export default function $HANDLER($REQ: NextApiRequest, $RES: NextApiResponse) {
+                ...
+              }
+          - pattern-not-inside: |
+              export default function $HANDLER($REQ: NextApiRequest, $RES: NextApiResponse) {
+                ...
+                $REQ.method
+                ...
+              }
+    applies_to: ["**/pages/api/**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Check req.method and return 405 for unsupported methods.
+      example: |
+        // Before — accepts all methods
+        export default function handler(req: NextApiRequest, res: NextApiResponse) {
+          const users = await db.users.findMany();
+          res.json(users);
+        }
+
+        // After — method-specific handling
+        export default function handler(req: NextApiRequest, res: NextApiResponse) {
+          if (req.method !== "GET") {
+            return res.status(405).json({ error: "Method not allowed" });
+          }
+          const users = await db.users.findMany();
+          res.json(users);
+        }
+    references:
+      - https://nextjs.org/docs/pages/building-your-application/routing/api-routes
+
+  - id: ts-nextjs-hardcoded-revalidate
+    name: Magic number in revalidate configuration
+    description: >
+      Flags numeric literals used directly in next.revalidate without
+      a named constant. Makes cache TTL intent unclear.
+    descriptions:
+      business: >
+        Cache durations are scattered as raw numbers throughout the
+        codebase with no explanation. When product needs change, nobody
+        knows which pages cache for 60 seconds vs 3600 seconds or why.
+        Named constants make cache strategy visible and changeable from
+        one place.
+      developer: >
+        A bare next: { revalidate: 3600 } tells you nothing about intent.
+        Is it 1 hour because the data updates hourly? Because the API
+        rate-limits? Extract to a named constant like PRODUCT_CACHE_TTL
+        so the reasoning is documented and centralized.
+    rationale: >
+      Magic numbers in revalidate configuration make it impossible to
+      understand the caching strategy at a glance. When cache TTLs are
+      scattered as bare numbers across dozens of fetch calls, changing
+      the caching strategy requires finding and updating every instance.
+      Named constants (PRODUCT_CACHE_TTL = 3600) document the intent
+      and centralize the configuration.
+    severity: info
+    tags: [nextjs, caching, maintainability]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: "next: { revalidate: $N }"
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/.next/**"]
+    fix:
+      message: Extract revalidate duration to a named constant that documents intent.
+      example: |
+        // Before — what does 3600 mean?
+        const data = await fetch(url, { next: { revalidate: 3600 } });
+
+        // After — intent is clear, centralized
+        const PRODUCT_CACHE_TTL = 3600; // 1 hour — products update via nightly sync
+        const data = await fetch(url, { next: { revalidate: PRODUCT_CACHE_TTL } });
+    references:
+      - https://nextjs.org/docs/app/building-your-application/caching#time-based-revalidation

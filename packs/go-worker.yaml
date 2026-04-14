@@ -1,0 +1,637 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-worker
+  name: Go Worker
+  version: 0.1.0
+  description: >
+    Principal-level rules for Go background workers and job processors.
+    Catches missing graceful shutdown, silent job failures, unbounded
+    processing, and operational visibility gaps that cause data loss
+    and silent degradation in production.
+  descriptions:
+    business: >
+      These rules protect your background job processing from silent
+      failures. Problems here look like jobs that disappear without a
+      trace during deployments, workers that silently stop processing
+      while appearing healthy, and runaway resource usage that crashes
+      your service. Background workers are especially risky because
+      failures are invisible to end users until downstream data is
+      missing or stale.
+    developer: >
+      This pack targets common Go worker anti-patterns: missing signal
+      handling that causes data loss on deploy, non-cancellable contexts
+      that break graceful shutdown, log-and-continue error handling that
+      hides failures, missing panic recovery that turns one bad job into
+      a full process crash, and CPU spin loops. Each rule addresses a
+      gap between "works in dev" and "survives in production."
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-worker.yaml
+  tags:
+    language: go
+    category: architecture
+    architecture: [workers]
+
+rules:
+  # ── Graceful shutdown ───────────────────────────────────────
+
+  - id: go-worker-no-signal-handling
+    name: Worker main loop without signal handling
+    description: >
+      Flags main functions that start a worker loop (via go, for, or
+      select) without calling signal.Notify for SIGTERM or SIGINT.
+      The worker cannot shut down gracefully when the orchestrator
+      sends a termination signal.
+    descriptions:
+      business: >
+        This worker gets killed mid-job every time you deploy, which
+        means jobs are lost or half-completed on every release. Think of
+        it like pulling the plug on a factory assembly line instead of
+        letting the current items finish -- you get incomplete products
+        and wasted materials. Without this fix, every deployment risks
+        data loss, duplicate processing, and inconsistent state that
+        requires manual cleanup.
+      developer: >
+        The main function starts a worker loop without calling
+        signal.Notify for SIGTERM/SIGINT. What happens is the Go runtime
+        terminates immediately on SIGTERM, abandoning in-flight jobs,
+        leaving database transactions open, and skipping offset commits.
+        The correct pattern is to trap SIGTERM, stop accepting new work,
+        drain in-flight jobs to completion, and then exit cleanly.
+    rationale: >
+      Kubernetes, systemd, and every major orchestrator send SIGTERM
+      before killing a process. Without signal.Notify, the Go runtime
+      receives the signal and terminates immediately — mid-flight jobs
+      are abandoned, database transactions are left open, and message
+      queue offsets are never committed. This causes duplicate
+      processing on restart and, worse, data corruption when writes
+      are partially applied. Every production worker must trap SIGTERM,
+      stop accepting new work, drain in-flight jobs, and then exit.
+      This is not optional infrastructure — it is the difference
+      between zero-downtime deploys and data loss on every rollout.
+    severity: error
+    tags: [workers, graceful-shutdown, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  func main() {
+                    ...
+                    go $FUNC(...)
+                    ...
+                  }
+              - pattern: |
+                  func main() {
+                    ...
+                    for { ... }
+                    ...
+                  }
+          - pattern-not-inside: |
+              func main() {
+                ...
+                signal.Notify(...)
+                ...
+              }
+    applies_to: ["**/main.go", "**/cmd/**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add signal.Notify for SIGTERM/SIGINT and use the signal to trigger graceful shutdown.
+      example: |
+        // Before — killed mid-job on every deploy
+        func main() {
+            for {
+                job := queue.Dequeue()
+                process(job)
+            }
+        }
+
+        // After — drains in-flight work before exiting
+        func main() {
+            ctx, cancel := context.WithCancel(context.Background())
+            defer cancel()
+
+            sigCh := make(chan os.Signal, 1)
+            signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+            go func() {
+                <-sigCh
+                log.Info("shutting down, draining in-flight jobs...")
+                cancel()
+            }()
+
+            for {
+                select {
+                case <-ctx.Done():
+                    return
+                default:
+                    job := queue.Dequeue(ctx)
+                    process(ctx, job)
+                }
+            }
+        }
+    references:
+      - https://pkg.go.dev/os/signal#Notify
+      - https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination
+
+  - id: go-worker-no-context-cancel
+    name: Worker loop using non-cancellable context
+    description: >
+      Flags worker loops that pass context.Background() or
+      context.TODO() into processing functions instead of a
+      cancellable context derived from signal handling.
+    descriptions:
+      business: >
+        This worker claims to shut down gracefully, but its jobs cannot
+        actually be stopped once started. Think of it like an emergency
+        stop button that is not wired to the machine -- pressing it does
+        nothing. Without this fix, during deployments the worker hangs
+        past its shutdown deadline, gets forcibly killed, and you lose
+        the in-flight work anyway.
+      developer: >
+        context.Background() or context.TODO() is passed into processing
+        functions inside a worker loop. What happens is these contexts
+        cannot be cancelled, so when the shutdown handler fires, in-flight
+        jobs continue running indefinitely until the orchestrator sends
+        SIGKILL. The correct pattern is to derive a cancellable context
+        from your signal handler and pass that to all job processing
+        functions.
+    rationale: >
+      context.Background() cannot be cancelled. When the worker
+      receives a shutdown signal, in-flight jobs using
+      context.Background() will run to completion regardless —
+      which sounds fine until one of those jobs is stuck on a
+      slow downstream call. The worker hangs past the orchestrator's
+      grace period, gets SIGKILL'd, and the job is lost anyway.
+      A cancellable context lets the shutdown handler propagate
+      cancellation to all in-flight work, enabling each job to
+      reach a safe stopping point (commit offset, release lock,
+      checkpoint state) within the grace period. Without it, your
+      graceful shutdown is a lie.
+    severity: warning
+    tags: [workers, context, graceful-shutdown]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: context.Background()
+              - pattern: context.TODO()
+          - pattern-inside: |
+              for ... {
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use a cancellable context derived from your shutdown signal instead of context.Background().
+      example: |
+        // Before — jobs cannot be stopped
+        for {
+            job := queue.Dequeue()
+            process(context.Background(), job)
+        }
+
+        // After — cancellation propagates to in-flight jobs
+        ctx, cancel := context.WithCancel(context.Background())
+        // cancel() is called by signal handler
+
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case job := <-jobCh:
+                process(ctx, job)
+            }
+        }
+    references:
+      - https://pkg.go.dev/context#WithCancel
+      - https://pkg.go.dev/context#Background
+
+  # ── Error handling ──────────────────────────────────────────
+
+  - id: go-worker-error-continue
+    name: Worker error handling without metrics or dead-letter queue
+    description: >
+      Flags error handling in worker loops that logs the error and
+      continues without incrementing a failure counter, emitting a
+      metric, or sending the failed job to a dead-letter queue.
+    descriptions:
+      business: >
+        This worker silently drops failed jobs with no way to know how
+        many are being lost or recover them later. Think of it like a
+        mail room that throws away undeliverable packages instead of
+        returning them to sender -- you have no idea what was lost.
+        Without this fix, you could be losing significant amounts of
+        business data for hours or days before anyone notices.
+      developer: >
+        The error handling path logs and continues without incrementing a
+        failure metric or sending to a dead-letter queue. What happens is
+        the worker appears healthy by every measure -- running, not
+        crashing, processing jobs -- while silently discarding every
+        failed job. The correct pattern is to always increment a failure
+        counter (for alerting) and ideally route failed jobs to a DLQ
+        (for recovery).
+    rationale: >
+      "Log and continue" is the most dangerous pattern in worker
+      code. The worker appears healthy — it's running, it's
+      processing, it's not crashing — but it's silently dropping
+      every job that hits an error path. You won't know until a
+      customer reports missing data, which could be hours or days
+      later. At minimum, every error path needs a failure counter
+      so your monitoring can alert when the error rate spikes.
+      Ideally, failed jobs go to a dead-letter queue for inspection
+      and replay. Without either, you have no idea how much data
+      you're losing or how to recover it.
+    severity: warning
+    tags: [workers, error-handling, observability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              if $ERR != nil {
+                ...
+                $LOG.$METHOD(...)
+                ...
+                continue
+              }
+          - pattern-inside: |
+              for ... {
+                ...
+              }
+          - pattern-not-inside: |
+              if $ERR != nil {
+                ...
+                $METRIC.$COUNT(...)
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add a failure metric or dead-letter queue alongside the log statement.
+      example: |
+        // Before — silent job loss
+        for job := range jobs {
+            if err := process(ctx, job); err != nil {
+                log.Error("job failed", "err", err)
+                continue
+            }
+        }
+
+        // After — failures are tracked and recoverable
+        for job := range jobs {
+            if err := process(ctx, job); err != nil {
+                log.Error("job failed", "err", err, "job_id", job.ID)
+                failureCounter.Inc()
+                dlq.Send(ctx, job, err)
+                continue
+            }
+            successCounter.Inc()
+        }
+    references:
+      - https://sre.google/sre-book/monitoring-distributed-systems/
+      - https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html
+
+  - id: go-worker-no-timeout
+    name: Job processing without context timeout
+    description: >
+      Flags job processing calls inside a worker loop that do not
+      wrap the context with a timeout or deadline. A single slow
+      job can block the worker indefinitely.
+    descriptions:
+      business: >
+        This worker has no time limit on individual jobs, so a single
+        slow or stuck job can block the entire worker forever. Think of
+        it like a checkout lane at a grocery store with no limit -- one
+        customer disputing a price holds up everyone behind them
+        indefinitely. Without this fix, your job queue grows unboundedly
+        while workers are stuck, and throughput drops to zero.
+      developer: >
+        Job processing calls inside the worker loop do not wrap the
+        context with context.WithTimeout or context.WithDeadline. What
+        happens is one stuck job (slow DB query, unresponsive API) blocks
+        the worker goroutine forever. The correct pattern is to create a
+        per-job timeout context so stuck jobs are cancelled after a
+        defined SLA and the worker can immediately pick up the next item.
+    rationale: >
+      In a worker pool, one stuck job blocks one worker goroutine
+      forever. Over time, all workers accumulate stuck jobs and
+      your throughput drops to zero while your queue depth grows
+      unboundedly. This is a slow-motion outage that's invisible
+      until the queue lag alert fires — by which point you have
+      hours of backlog. A per-job timeout (via context.WithTimeout)
+      ensures that no single job can monopolize a worker for longer
+      than a defined SLA. The timed-out job gets retried or sent to
+      a dead-letter queue, and the worker immediately picks up the
+      next item.
+    severity: warning
+    tags: [workers, timeout, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $PROCESS($CTX, ...)
+          - pattern-inside: |
+              for ... {
+                ...
+              }
+          - pattern-not-inside: |
+              $CTX, $CANCEL := context.WithTimeout(...)
+              ...
+              $PROCESS($CTX, ...)
+          - pattern-not-inside: |
+              $CTX, $CANCEL := context.WithDeadline(...)
+              ...
+              $PROCESS($CTX, ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Wrap the context with context.WithTimeout before processing each job.
+      example: |
+        // Before — one slow job blocks the worker forever
+        for job := range jobs {
+            process(ctx, job)
+        }
+
+        // After — each job gets a bounded execution window
+        for job := range jobs {
+            jobCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+            err := process(jobCtx, job)
+            cancel()
+            if err != nil {
+                handleFailure(ctx, job, err)
+            }
+        }
+    references:
+      - https://pkg.go.dev/context#WithTimeout
+      - https://pkg.go.dev/context#WithDeadline
+
+  # ── Panic recovery ─────────────────────────────────────────
+
+  - id: go-worker-no-recovery
+    name: Worker goroutine without panic recovery
+    description: >
+      Flags goroutines launched as worker processors that do not
+      contain a deferred recover() call. A panic in any single
+      worker goroutine kills the entire process.
+    descriptions:
+      business: >
+        This worker has no crash protection, so a single bad job can
+        take down the entire service and all other jobs being processed.
+        Think of it like a factory floor where one machine malfunction
+        triggers an emergency shutdown of the entire facility. Without
+        this fix, one malformed record in your queue causes a crash
+        loop -- the service restarts, dequeues the same bad record,
+        crashes again, and all processing stops.
+      developer: >
+        Worker goroutines are launched without a deferred recover() call.
+        What happens is a panic in any single goroutine (nil pointer,
+        index out of range) terminates the entire process, killing all
+        N workers and every in-flight job. The correct pattern is to
+        defer a recover() at the top of each worker goroutine, log the
+        panic with a stack trace, and continue processing.
+    rationale: >
+      Go's default panic behavior terminates the entire process,
+      not just the panicking goroutine. In a worker pool with N
+      goroutines processing jobs, a single nil pointer dereference
+      or index-out-of-range in one job's data kills all N workers
+      and every in-flight job. The process restarts, re-dequeues
+      the same poison-pill message, panics again, and enters a
+      crash loop. With defer/recover at the top of each worker
+      goroutine, the bad job is caught, logged, sent to a
+      dead-letter queue, and the worker continues processing.
+      This is the difference between one bad record and a
+      full production outage.
+    severity: error
+    tags: [workers, panic-recovery, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              go func(...) {
+                ...
+              }(...)
+          - pattern-not-inside: |
+              go func(...) {
+                defer func() { ... recover() ... }()
+                ...
+              }(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add a deferred recover() at the top of the worker goroutine to catch panics.
+      example: |
+        // Before — one bad job kills all workers
+        for i := 0; i < numWorkers; i++ {
+            go func() {
+                for job := range jobs {
+                    process(ctx, job)
+                }
+            }()
+        }
+
+        // After — panics are contained per-job
+        for i := 0; i < numWorkers; i++ {
+            go func() {
+                defer func() {
+                    if r := recover(); r != nil {
+                        log.Error("worker panic recovered",
+                            "panic", r,
+                            "stack", string(debug.Stack()))
+                        panicCounter.Inc()
+                    }
+                }()
+                for job := range jobs {
+                    process(ctx, job)
+                }
+            }()
+        }
+    references:
+      - https://go.dev/blog/defer-panic-and-recover
+      - https://pkg.go.dev/runtime/debug#Stack
+
+  # ── Resource usage ──────────────────────────────────────────
+
+  - id: go-worker-infinite-loop-no-sleep
+    name: Infinite loop without sleep or blocking receive
+    description: >
+      Flags for {} or for true {} loops that do not contain a
+      time.Sleep, time.Tick, time.After, ticker, or channel
+      receive. The loop will spin the CPU at 100%.
+    descriptions:
+      business: >
+        This code runs a loop that consumes 100% of a CPU core doing
+        nothing useful, which is like leaving a car engine redlining in
+        park. It wastes compute costs, triggers CPU throttling that slows
+        down your entire service, and can cause Kubernetes to kill the
+        container. Without this fix, you are paying for wasted compute
+        and degrading performance for all users.
+      developer: >
+        A for {} loop has no blocking operation inside it (no
+        time.Sleep, no ticker, no channel receive, no select). What
+        happens is it becomes a CPU spin loop consuming 100% of one
+        core, which triggers Kubernetes CPU throttling that affects all
+        goroutines in the process. The correct pattern is to always
+        include a blocking operation: a channel receive, time.Sleep,
+        ticker, or select with ctx.Done().
+    rationale: >
+      A bare for {} loop without any blocking operation is a CPU
+      spin loop. It will consume 100% of one CPU core, generate
+      enormous heat in your container, and likely trigger CPU
+      throttling in Kubernetes — which then slows down ALL
+      goroutines in the process, not just the spinning one. This
+      often happens when a developer writes a polling loop and
+      forgets the sleep, or when a select{} block is missing its
+      channel cases. The fix is to always have a blocking operation
+      inside the loop: a channel receive, a time.Sleep, a ticker,
+      or a context.Done() check with a sleep fallback.
+    severity: warning
+    tags: [workers, performance, cpu]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  for {
+                    ...
+                  }
+              - pattern: |
+                  for true {
+                    ...
+                  }
+          - pattern-not-inside: |
+              for ... {
+                ...
+                time.Sleep(...)
+                ...
+              }
+          - pattern-not-inside: |
+              for ... {
+                ...
+                select { ... }
+                ...
+              }
+          - pattern-not-inside: |
+              for ... {
+                ...
+                <-$CH
+                ...
+              }
+          - pattern-not-inside: |
+              for $X := range $CH {
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add a time.Sleep, ticker, or channel receive inside the loop to prevent CPU spinning.
+      example: |
+        // Before — 100% CPU spin
+        for {
+            items, _ := queue.Poll()
+            if len(items) > 0 {
+                process(items)
+            }
+        }
+
+        // After — controlled polling interval
+        ticker := time.NewTicker(100 * time.Millisecond)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                items, _ := queue.Poll()
+                if len(items) > 0 {
+                    process(items)
+                }
+            }
+        }
+    references:
+      - https://pkg.go.dev/time#NewTicker
+      - https://gobyexample.com/tickers
+
+  - id: go-worker-unbounded-queue
+    name: Work queue channel without backpressure
+    description: >
+      Flags make(chan, N) with very large buffer sizes (1000+) or
+      unbuffered channels used as work queues without any
+      backpressure mechanism like a semaphore or rate limiter.
+    descriptions:
+      business: >
+        This code creates a massive internal buffer that hides the fact
+        that work is piling up faster than it can be processed. Think of
+        it like a warehouse that keeps accepting deliveries with no
+        capacity limit -- it works until the building is full, then
+        everything collapses at once. Without this fix, memory usage
+        grows silently until the service crashes, losing all buffered
+        work.
+      developer: >
+        A channel is created with an excessively large buffer (10k+),
+        which hides backpressure from producers. What happens is when
+        consumers fall behind, the buffer silently fills, memory grows,
+        and eventually the process is OOM-killed -- losing all buffered
+        work. The correct pattern is to size the buffer to your worker
+        count and let producers block when the channel is full, making
+        overload visible immediately.
+    rationale: >
+      A channel with a massive buffer (or worse, an unbounded
+      slice used as a queue) hides backpressure. When producers
+      outpace consumers, the buffer fills silently — memory usage
+      grows, GC pressure increases, and eventually the process
+      OOMs. By the time you notice, you've lost all buffered work.
+      The correct pattern is a reasonably-sized buffered channel
+      (matching your worker count) combined with explicit
+      backpressure: block the producer when the channel is full,
+      or use a semaphore to limit concurrency. This makes overload
+      visible immediately through producer-side latency rather than
+      silently accumulating debt.
+    severity: warning
+    tags: [workers, backpressure, memory]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: make(chan $TYPE, 10000)
+          - pattern: make(chan $TYPE, 100000)
+          - pattern: make(chan $TYPE, 1000000)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use a bounded channel sized to your worker count and add backpressure for producers.
+      example: |
+        // Before — 100k buffer hides backpressure
+        jobs := make(chan Job, 100000)
+
+        // After — bounded queue with explicit backpressure
+        const numWorkers = 10
+        jobs := make(chan Job, numWorkers*2) // small buffer
+
+        // Producer blocks when workers are saturated,
+        // making overload visible immediately
+        select {
+        case jobs <- job:
+            // enqueued
+        default:
+            // queue full — apply backpressure
+            backpressureCounter.Inc()
+            log.Warn("job queue full, applying backpressure")
+        }
+    references:
+      - https://go.dev/blog/pipelines
+      - https://pkg.go.dev/golang.org/x/sync/semaphore

@@ -1,0 +1,409 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-comment-hygiene
+  name: Go Comment Hygiene
+  version: 0.1.0
+  description: >
+    Comment and documentation hygiene rules for Go projects. Ensures
+    exported symbols are documented, comments follow Go conventions,
+    and stale or meaningless comments don't accumulate.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-comment-hygiene.yaml
+
+rules:
+  # ── Documentation completeness ─────────────────────────────────
+
+  - id: go-exported-without-doc
+    name: Exported symbol missing doc comment
+    description: >
+      Flags exported functions, types, constants, and methods that have
+      no doc comment. Go convention requires every exported symbol to
+      have a comment starting with the symbol name.
+    descriptions:
+      business: >
+        Your Go package is a product that other developers consume. When
+        exported symbols have no documentation, consumers must read the
+        source code to understand what a function does, what a type
+        represents, or what a constant means. This slows down every team
+        that depends on your package, increases support requests, and
+        leads to misuse that causes bugs in downstream services.
+      developer: >
+        An exported symbol (function, type, method, constant, or variable)
+        has no doc comment. Go's tooling — godoc, pkg.go.dev, IDE hover
+        tooltips — all rely on these comments to generate documentation.
+        Without them, the symbol appears as undocumented in all tooling
+        and the package feels incomplete. The fix is to add a comment
+        starting with the symbol name, e.g. "// ProcessData transforms..."
+    rationale: >
+      Effective Go and the Go Code Review Comments wiki both mandate doc
+      comments on exported symbols. The godoc tool, pkg.go.dev, and every
+      IDE tooltip extract these comments to generate documentation. An
+      undocumented exported symbol is an undocumented public API — callers
+      must read source code to understand the contract. LLMs frequently
+      generate exported functions without any documentation, creating a
+      growing documentation debt that compounds as the codebase scales.
+    severity: warning
+    tags: [documentation, conventions, godoc]
+    detector:
+      capability: golangci-lint
+      config:
+        linter: revive
+        rule: exported
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/*_test.go"
+      - "**/vendor/**"
+    fix:
+      message: Add a doc comment starting with the symbol name.
+      example: |
+        // Before
+        func ProcessData(d []byte) error { ... }
+
+        // After
+        // ProcessData transforms raw bytes into the canonical wire format
+        // and returns an error if the input is malformed.
+        func ProcessData(d []byte) error { ... }
+    references:
+      - https://go.dev/doc/effective_go#commentary
+      - https://go.dev/wiki/CodeReviewComments#doc-comments
+      - https://pkg.go.dev/go/doc#Synopsis
+
+  - id: go-package-comment-missing
+    name: Package without doc comment
+    description: >
+      Flags Go packages that have no package-level doc comment. Every
+      package should have a comment on the package clause in at least
+      one file (typically doc.go) explaining what the package provides.
+    descriptions:
+      business: >
+        A package without a description is like a product without a label.
+        Developers browsing your internal package index or pkg.go.dev cannot
+        tell what the package does without opening files and reading code.
+        This wastes time for every new team member and every developer
+        evaluating whether to use the package. A single sentence fixes it.
+      developer: >
+        No file in this package has a doc comment on the package clause.
+        Go convention requires at least one file (often doc.go) to have a
+        comment immediately preceding `package foo` that describes the
+        package's purpose. This comment appears in godoc, pkg.go.dev, and
+        IDE package navigation. Add a comment like "// Package foo provides..."
+    rationale: >
+      The package comment is the first thing a developer sees when browsing
+      packages in godoc or pkg.go.dev. Without it, the package listing shows
+      a blank description and the developer must click through to understand
+      what the package provides. Go convention is to place the package comment
+      in a doc.go file for non-trivial packages. The comment should start
+      with "Package <name>" and describe what the package provides, not how
+      it works internally.
+    severity: warning
+    tags: [documentation, conventions, godoc]
+    detector:
+      capability: golangci-lint
+      config:
+        linter: revive
+        rule: package-comments
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/*_test.go"
+      - "**/vendor/**"
+    fix:
+      message: Add a package-level doc comment starting with "Package <name>".
+      example: |
+        // Before
+        package auth
+
+        // After — in doc.go or the primary source file
+        // Package auth provides token-based authentication and authorization
+        // middleware for HTTP handlers.
+        package auth
+    references:
+      - https://go.dev/doc/effective_go#commentary
+      - https://go.dev/blog/package-names
+      - https://go.dev/wiki/CodeReviewComments#package-comments
+
+  # ── Comment formatting ─────────────────────────────────────────
+
+  - id: go-comment-sentence-format
+    name: Doc comment not a complete sentence
+    description: >
+      Flags doc comments that do not end with a period. Go convention
+      says doc comments should be complete English sentences ending
+      with proper punctuation.
+    descriptions:
+      business: >
+        Incomplete doc comments look unprofessional in generated API
+        documentation. When your package appears on pkg.go.dev or in
+        internal documentation portals, sentence fragments make the
+        package look hastily written and erode trust. Consistent
+        formatting across all documentation signals engineering maturity
+        and makes the docs pleasant to read.
+      developer: >
+        A doc comment does not end with a period. Go convention (Effective
+        Go, Go Code Review Comments) requires doc comments to be complete
+        sentences. This is enforced by godot and improves readability in
+        godoc output, where comments from different symbols appear together
+        in a continuous documentation page. Sentence fragments break the
+        reading flow.
+    rationale: >
+      Go doc comments are rendered as continuous prose in godoc and
+      pkg.go.dev. A comment like "// ProcessData transforms bytes" reads
+      as a sentence fragment when rendered alongside other documentation.
+      The Go project style guide requires comments to be complete sentences
+      ending with a period. The godot linter enforces this convention. This
+      is a small formatting detail that compounds across a package —
+      consistent punctuation makes the generated documentation look polished.
+    severity: warning
+    tags: [documentation, style, conventions]
+    detector:
+      capability: golangci-lint
+      config:
+        linter: godot
+        rule: godot
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/*_test.go"
+      - "**/vendor/**"
+    fix:
+      message: End the doc comment with a period.
+      example: |
+        // Before
+        // ProcessData transforms raw bytes into the canonical format
+
+        // After
+        // ProcessData transforms raw bytes into the canonical format.
+    references:
+      - https://go.dev/doc/effective_go#commentary
+      - https://go.dev/wiki/CodeReviewComments#comment-sentences
+
+  - id: go-comment-spacing
+    name: Comment missing space after //
+    description: >
+      Flags comments that have no space between the // delimiter and the
+      comment text. Go convention requires a single space after //.
+    descriptions:
+      business: >
+        Inconsistent comment formatting makes code look sloppy in code
+        reviews, documentation tools, and IDE previews. When some comments
+        have spaces and others don't, the codebase appears careless.
+        Enforcing a simple formatting rule eliminates this class of
+        nit-pick comments in code review and keeps the team focused on
+        substantive feedback.
+      developer: >
+        A comment was written as "//text" instead of "// text". The Go
+        style guide requires a single space after the // delimiter for
+        readability. This is a common habit from other languages where
+        the convention differs. The revive linter's comment-spacings rule
+        catches this automatically so it does not need to be flagged in
+        code review.
+    rationale: >
+      The Go community convention is a single space after // in regular
+      comments. This is documented in the Go Code Review Comments wiki
+      and enforced by gofmt for doc comments. Comments like "//nolint" are
+      a special case (tool directives), but regular prose comments should
+      always have the space. The comment-spacings rule from revive catches
+      missing spaces while allowing known directives.
+    severity: warning
+    tags: [style, formatting, conventions]
+    detector:
+      capability: golangci-lint
+      config:
+        linter: revive
+        rule: comment-spacings
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/*_test.go"
+      - "**/vendor/**"
+    fix:
+      message: Add a space after // in the comment.
+      example: |
+        // Before
+        //processData transforms raw bytes
+        //TODO: handle edge case
+
+        // After
+        // processData transforms raw bytes
+        // TODO: handle edge case
+    references:
+      - https://go.dev/wiki/CodeReviewComments#comment-sentences
+      - https://go.dev/doc/effective_go#commentary
+
+  # ── Lint suppression hygiene ───────────────────────────────────
+
+  - id: go-nolint-without-reason
+    name: //nolint directive without explanation
+    description: >
+      Flags //nolint comments that suppress linter warnings without
+      providing a reason. Every lint suppression should explain why
+      the rule does not apply in this specific case.
+    descriptions:
+      business: >
+        Lint suppressions without explanations are a maintenance hazard.
+        When a developer encounters //nolint with no reason, they cannot
+        tell whether the suppression was intentional or a shortcut to
+        silence a warning the developer didn't want to fix. Over time,
+        unexplained suppressions accumulate and mask real issues — turning
+        your linter configuration into security theater.
+      developer: >
+        A //nolint directive was used without a reason comment. The
+        nolintlint linter requires every //nolint to include a brief
+        explanation of why the suppression is necessary. This prevents
+        drive-by suppressions and makes it possible to audit whether
+        suppressions are still valid after code changes. Use the format
+        "//nolint:rulename // reason for suppression".
+    rationale: >
+      //nolint without a reason is the Go equivalent of a bare "except
+      Exception" — it silences a warning without documenting why. When
+      code changes later, no one knows whether the suppression is still
+      valid. The nolintlint meta-linter requires each //nolint to specify
+      which linter it targets and why. This forces the author to justify
+      the suppression at the time they write it, and gives future
+      reviewers enough context to evaluate whether it's still needed.
+    severity: warning
+    tags: [lint-hygiene, maintainability, conventions]
+    detector:
+      capability: golangci-lint
+      config:
+        linter: nolintlint
+        rule: nolintlint
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+    fix:
+      message: Add a reason to the //nolint directive explaining why the suppression is needed.
+      example: |
+        // Before — why is this suppressed?
+        //nolint:errcheck
+        db.Close()
+
+        // After — reason documented for future reviewers
+        //nolint:errcheck // best-effort cleanup in defer, error is logged above
+        db.Close()
+    references:
+      - https://golangci-lint.run/usage/false-positives/#nolint-directive
+      - https://github.com/golangci/golangci-lint/blob/master/pkg/golinters/nolintlint/README.md
+
+  # ── Comment quality ────────────────────────────────────────────
+
+  - id: go-todo-without-issue
+    name: TODO/FIXME comment without tracking reference
+    description: >
+      Flags TODO, FIXME, and HACK comments that lack a tracking reference
+      such as a parenthetical author name, issue number, or ticket link.
+      Unattributed TODOs become permanent fixtures that no one owns.
+    descriptions:
+      business: >
+        TODO comments without a ticket number or owner are promises that
+        no one tracks. They pile up silently — your codebase accumulates
+        hundreds of "TODO: fix this later" notes that never get fixed
+        because they're not in any backlog. Meanwhile, the issues they
+        describe may be causing real bugs or performance problems. Requiring
+        a tracking reference ensures every TODO has an owner and a path to
+        resolution.
+      developer: >
+        A TODO, FIXME, or HACK comment was written without a tracking
+        reference. The convention is TODO(username), TODO(#123), or
+        TODO(JIRA-456) so the comment can be traced to an owner or ticket.
+        Bare TODOs without attribution are invisible to project tracking
+        tools and accumulate indefinitely. Add a parenthetical reference
+        so the item can be found, prioritized, and eventually resolved.
+    rationale: >
+      Bare TODO comments ("// TODO fix this") have no owner, no ticket,
+      and no expiration date. They accumulate in every codebase and become
+      permanent fixtures — a study of open-source Go projects found that
+      the average TODO is over two years old. The convention TODO(author)
+      or TODO(#issue) creates accountability: the author is responsible
+      for either fixing it or filing a ticket, and the reference makes
+      the item discoverable in project tracking. Without this, TODOs are
+      just wishful comments that never get done.
+    severity: warning
+    tags: [comment-quality, tracking, maintainability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-regex: "//\\s*(TODO|FIXME|HACK)(?!\\s*\\()"
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+    fix:
+      message: Add a tracking reference to the TODO comment — author name, issue number, or ticket link.
+      example: |
+        // Before — no owner, no tracking
+        // TODO fix the race condition in process()
+        // FIXME handle the error properly
+        // HACK this works but is brittle
+
+        // After — attributed, trackable
+        // TODO(alice) fix the race condition in process()
+        // FIXME(#1234) handle the error properly
+        // HACK(PROJ-567) this works but is brittle — will refactor in Q3
+    references:
+      - https://go.dev/wiki/CodeReviewComments#comment-sentences
+      - https://google.github.io/styleguide/go/decisions#commentary
+
+  - id: go-deprecated-without-alternative
+    name: Deprecated comment without migration guidance
+    description: >
+      Flags // Deprecated comments that mark a symbol as deprecated but
+      do not tell the caller what to use instead. A deprecation without
+      a migration path is not actionable.
+    descriptions:
+      business: >
+        Marking something as deprecated without saying what to use instead
+        leaves your API consumers stranded. They know the old function is
+        going away, but not where to go. This creates support tickets,
+        Slack messages, and confusion that slows down every team depending
+        on your package. A single sentence — "Use X instead" — eliminates
+        an entire class of questions.
+      developer: >
+        A // Deprecated comment was added without specifying an alternative.
+        Go convention (and godoc rendering since Go 1.19) requires
+        Deprecated comments to include a migration path — what the caller
+        should use instead. Without this, the deprecation is not actionable:
+        the caller sees the warning but has no guidance on how to migrate.
+        Always include "Use X instead" or "See Y for the replacement."
+    rationale: >
+      Go's tooling (pkg.go.dev, gopls, staticcheck) recognizes the
+      "// Deprecated:" comment format and displays deprecation warnings.
+      But a warning without guidance is noise — it tells the caller to
+      stop using something without telling them what to use instead. The
+      Go project's own deprecation comments always include an alternative:
+      "Deprecated: Use errors.As instead." Following this pattern makes
+      deprecations actionable and reduces the support burden on package
+      maintainers.
+    severity: warning
+    tags: [documentation, api-lifecycle, deprecation]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-regex: "//\\s*Deprecated:?[^\\n]*$(?!.*(?i)(use |see |replace|instead|migrate))"
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+    fix:
+      message: Add migration guidance to the Deprecated comment — specify what to use instead.
+      example: |
+        // Before — deprecated but no migration path
+        // Deprecated: do not use.
+        func OldProcess(data []byte) error { ... }
+
+        // After — actionable deprecation
+        // Deprecated: Use ProcessV2 instead, which supports streaming input
+        // and returns structured errors.
+        func OldProcess(data []byte) error { ... }
+    references:
+      - https://go.dev/wiki/Deprecated
+      - https://go.dev/doc/comment#deprecated
+      - https://pkg.go.dev/go/doc#Note

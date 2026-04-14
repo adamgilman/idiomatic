@@ -1,0 +1,25 @@
+apiVersion: rules.idiomatic.dev/v2beta1
+kind: RulePack
+
+pack:
+  id: test-pack
+  name: Test Pack
+  version: 0.1.0
+  description: Test pack.
+  maintainer: test
+
+rules:
+  - id: test-rule
+    name: Test rule
+    description: A test rule.
+    rationale: Testing.
+    severity: info
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: x
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Fix it.

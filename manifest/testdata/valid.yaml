@@ -1,0 +1,78 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-tdd-starter
+  name: Go with TDD
+  version: 0.1.0
+  description: Foundational test-driven development enforcement for Go projects.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-tdd-starter.yaml
+
+rules:
+  - id: go-tdd-test-file-required
+    name: Every package must have a test file
+    description: |
+      Flags any Go package that contains source files but no corresponding
+      test file (a file matching *_test.go in the same package directory).
+    rationale: |
+      Test-driven development requires that tests exist alongside the code
+      they exercise. A package with no test file is a signal that either
+      tests are missing, are stored in a non-standard location, or that TDD
+      is not being practiced on this code path. Flagging this early prevents
+      untested code from accumulating silently.
+    severity: error
+    tags:
+      - tdd
+      - testing
+      - go
+
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: package $NAME
+
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+      - "**/*_generated.go"
+      - "**/*.pb.go"
+
+    fix:
+      message: Create a test file for this package before adding more production code.
+      example: |
+        // File: foo_test.go
+        package foo
+
+        import "testing"
+
+        func TestFoo(t *testing.T) {
+            t.Fatal("not yet implemented")
+        }
+
+    references:
+      - https://github.com/adamgilman/idiomatic/blob/main/docs/rules/go-tdd-test-file-required
+      - https://go.dev/doc/tutorial/add-a-test
+
+    tests:
+      - name: package with no test file fires
+        should: fire
+        code: |
+          package foo
+
+          func Add(a, b int) int {
+              return a + b
+          }
+
+      - name: package with test file passes
+        should: pass
+        code: |
+          package foo
+
+          func Add(a, b int) int {
+              return a + b
+          }
+          // foo_test.go exists in the same package

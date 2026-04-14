@@ -1,0 +1,157 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: eslint
+  version: 1.0.0
+  description: ECMAScript/TypeScript linter (ESLint flat config) — discovers a locally installed binary, finds tsconfig.json, validates plugin presence, writes config to the project root, and parses ESLint's nested JSON output.
+
+spec:
+  applies_to_files:
+    extensions: [".ts", ".tsx"]
+
+  requires:
+    binary: eslint
+    install: "npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin"
+
+    # Walk up from CWD looking for node_modules/.bin/eslint. The directory
+    # containing the match becomes {project_root}.
+    discover:
+      strategy: walk_up_from_cwd
+      relative: node_modules/.bin/eslint
+      fallback_to_path: true
+
+    # Find tsconfig.json walking up from CWD; expose as {discovered.tsconfig}.
+    # Optional: type-aware rules are skipped at template render time when this
+    # is empty.
+    discover_files:
+      - var: tsconfig
+        name: tsconfig.json
+        walk_up_from: cwd
+        optional: true
+
+    # For every unique non-skipped value of the rule input "plugin", verify
+    # that node_modules/<plugin> exists in the discovered project root.
+    # @typescript-eslint/eslint-plugin is always present (it's the parser
+    # plugin we install with eslint itself), so we skip it.
+    precheck:
+      - kind: file_exists
+        path: "{project_root}/node_modules/{{ .Value }}"
+        for_each_unique_input: plugin
+        skip_values:
+          - "@typescript-eslint/eslint-plugin"
+        error_message: |
+          ESLint plugin {{ .Value }} not found in {project_root}/node_modules.
+          Install with: npm install --save-dev {{ .Value }}
+
+  inputs:
+    rule:
+      type: string
+      required: true
+      description: Full ESLint rule name (e.g. @typescript-eslint/no-explicit-any)
+    plugin:
+      type: string
+      description: npm package name of the plugin providing this rule
+    type_aware:
+      type: any
+      description: Set to true if this rule needs type information (skipped when no tsconfig is found)
+
+  run:
+    per: batch
+    config_file:
+      # Written into the discovered project root so ESLint can resolve
+      # plugin imports relative to its node_modules. {pid} avoids
+      # collisions across concurrent invocations.
+      path: "{project_root}/.idio-eslint-config-{pid}.mjs"
+      template: |
+        import tsParser from '@typescript-eslint/parser';
+        import tsPlugin from '@typescript-eslint/eslint-plugin';
+        {{- $tsRules := list }}
+        {{- $reactRules := list }}
+        {{- range .Rules }}
+        {{- $plugin := index .Inputs "plugin" | default "" }}
+        {{- if or (eq $plugin "eslint-plugin-react") (eq $plugin "eslint-plugin-react-hooks") }}
+        {{- $reactRules = append $reactRules . }}
+        {{- else }}
+        {{- $tsRules = append $tsRules . }}
+        {{- end }}
+        {{- end }}
+        {{- if $reactRules }}
+        import reactPlugin from 'eslint-plugin-react';
+        import reactHooksPlugin from 'eslint-plugin-react-hooks';
+        {{- end }}
+
+        export default [
+          {
+            files: ["**/*.ts", "**/*.tsx"],
+            plugins: { "@typescript-eslint": tsPlugin },
+            languageOptions: {
+              parser: tsParser,
+              {{- if .Discovered.tsconfig }}
+              parserOptions: { project: {{ .Discovered.tsconfig | quote }} },
+              {{- end }}
+            },
+            rules: {
+        {{- range $tsRules }}
+        {{- $typeAware := index .Inputs "type_aware" }}
+        {{- if and (not $.Discovered.tsconfig) (eq $typeAware true) }}
+        {{- /* skip type-aware rule when no tsconfig is available */ -}}
+        {{- else }}
+              {{ index .Inputs "rule" | quote }}: {{ if eq .Severity "error" }}"error"{{ else }}"warn"{{ end }},
+        {{- end }}
+        {{- end }}
+            },
+          },
+          {{- if $reactRules }}
+          {
+            files: ["**/*.tsx", "**/*.jsx"],
+            plugins: { "react": reactPlugin, "react-hooks": reactHooksPlugin },
+            languageOptions: {
+              parser: tsParser,
+              parserOptions: { ecmaFeatures: { jsx: true } },
+            },
+            rules: {
+        {{- range $reactRules }}
+              {{ index .Inputs "rule" | quote }}: {{ if eq .Severity "error" }}"error"{{ else }}"warn"{{ end }},
+        {{- end }}
+            },
+          },
+          {{- end }}
+        ];
+    argv:
+      - --no-config-lookup
+      - --config
+      - "{config_file}"
+      - --format
+      - json
+      - "{files}"
+    timeout: 30s
+    ok_exit: [1]
+    output: stdout
+
+  signal:
+    shape: list
+    source: stdout
+    format: json
+    # ESLint output is [{filePath, messages: [...]}, ...]. We walk every file
+    # entry, then every message inside that entry, projecting filePath onto
+    # each finding via parent_fields.
+    list: ""              # outer is a top-level array
+    nested_list: messages # inner array on each outer entry
+    parent_fields:
+      file: filePath
+    match_rule_by:
+      strategy: by_input
+      field: rule
+      from: ruleId
+    fields:
+      file:     parent.file
+      line:     line
+      col:      column
+      end_line: endLine
+      end_col:  endColumn
+      message:  message
+      severity: severity
+    severity_map:
+      "1": warning
+      "2": error

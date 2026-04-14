@@ -1,0 +1,71 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: multi-pack
+  name: Multi Rule Pack
+  version: 1.0.0
+  description: Pack with multiple rules.
+  maintainer: test
+
+rules:
+  - id: rule-alpha
+    name: Alpha rule
+    description: First rule.
+    rationale: Testing multi-rule packs.
+    severity: error
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: alpha
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Fix alpha.
+
+  - id: rule-beta
+    name: Beta rule
+    description: Second rule.
+    rationale: Testing multi-rule packs.
+    severity: warning
+    tags:
+      - beta
+    detector:
+      capability: eslint
+      config:
+        rule: no-explicit-any
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+    fix:
+      message: Fix beta.
+
+  - id: rule-gamma
+    name: Gamma rule
+    description: Third rule.
+    rationale: Testing multi-rule packs.
+    severity: info
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: foo
+    applies_to:
+      - "**/*.py"
+    fix:
+      message: Fix gamma.
+    tests:
+      - name: basic fire test
+        should: fire
+        code: |
+          def foo():
+              pass
+      - name: basic pass test
+        should: pass
+        code: |
+          def foo():
+              pass
+          # test exists

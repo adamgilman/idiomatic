@@ -1,0 +1,41 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-capability-test
+  name: Go Capability Test
+  version: 0.1.0
+  description: Test fixture using capability+config detector format.
+  maintainer: idiomatic
+
+rules:
+  - id: go-cap-test-rule
+    name: Capability format test rule
+    description: A rule using the new capability+config format.
+    rationale: Validates the new detector format works end-to-end.
+    severity: error
+    tags:
+      - testing
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: require-test-file
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Create a test file.
+      example: |
+        // File: foo_test.go
+        package foo
+    tests:
+      - name: fires on package without tests
+        should: fire
+        code: |
+          package foo
+          func Hello() {}
+      - name: passes on package with tests
+        should: pass
+        code: |
+          package foo
+          func TestHello(t *testing.T) {}

@@ -1,0 +1,25 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: Bad_Pack_ID
+  name: Test Pack
+  version: 0.1.0
+  description: Test pack.
+  maintainer: test
+
+rules:
+  - id: UPPER_CASE_ID
+    name: Bad ID rule
+    description: This rule has a bad ID.
+    rationale: Testing ID validation.
+    severity: error
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: x
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Fix it.

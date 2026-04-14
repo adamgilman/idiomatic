@@ -1,0 +1,795 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-grpc
+  name: Go gRPC
+  version: 0.1.0
+  description: >
+    Principal-level gRPC rules for Go services. Catches incorrect status
+    code usage, missing interceptors, connection management issues, and
+    streaming anti-patterns that degrade reliability and observability
+    in service-to-service communication.
+  descriptions:
+    business: >
+      These rules protect your service-to-service communication layer --
+      the internal plumbing that connects your microservices. Problems here
+      cause cascading outages where one service failure takes down others,
+      silent data loss between services, and security gaps that expose
+      internal traffic. Fixing these issues prevents the kind of incidents
+      that wake up your on-call team at 3 AM and impact every customer at once.
+    developer: >
+      This pack targets common gRPC misconfigurations in Go: wrong status
+      codes that break client retry logic, missing interceptors that leave
+      you blind in production, insecure transport credentials, connection
+      leaks, and streaming pitfalls. Each rule maps to a real production
+      incident pattern -- the kind of bug that works fine in dev but fails
+      under load or after idle periods.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-grpc.yaml
+  tags:
+    language: go
+    vendor: grpc
+    category: http
+    architecture: [services]
+
+rules:
+  # ── Status codes ────────────────────────────────────────────
+
+  - id: go-grpc-internal-for-everything
+    name: Using codes.Internal for all gRPC errors
+    description: >
+      Flags calls to status.Error(codes.Internal, ...) outside of test
+      functions. codes.Internal should be reserved for genuine server-side
+      failures, not used as a catch-all for every error.
+    descriptions:
+      business: >
+        This code labels every error the same way, so your monitoring
+        dashboards cannot distinguish a user typo from a database outage.
+        Think of it like a hospital ER that triages every patient as
+        "critical" -- real emergencies get lost in the noise. Without
+        this fix, your on-call team cannot prioritize incidents, alerts
+        fire constantly, and customer-facing errors take longer to resolve.
+      developer: >
+        codes.Internal is being used as a catch-all for every gRPC error.
+        What happens is the client cannot programmatically distinguish
+        failure modes -- NotFound, InvalidArgument, and genuine server
+        errors all look identical. The correct pattern is to map each
+        error to its specific gRPC status code so clients can retry,
+        show appropriate UI, or escalate accordingly.
+    rationale: >
+      gRPC status codes exist so clients can programmatically react to
+      different failure modes: retry on Unavailable, show a 404 page on
+      NotFound, prompt the user to fix input on InvalidArgument. When every
+      error is codes.Internal, the client has no idea what went wrong —
+      it cannot distinguish "your request was malformed" from "the database
+      is down." Dashboards that track error rates by code become useless,
+      alerting fires on every error equally, and on-call engineers lose the
+      ability to triage by error category. Use the specific status code
+      that matches the failure: NotFound for missing resources,
+      InvalidArgument for bad input, PermissionDenied for auth failures,
+      and reserve Internal for truly unexpected server errors.
+    severity: warning
+    tags: [grpc, status-codes, observability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: status.Error(codes.Internal, ...)
+          - pattern-not-inside: |
+              func Test$F(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Use a specific gRPC status code (NotFound, InvalidArgument, PermissionDenied, etc.) instead of codes.Internal.
+      example: |
+        // Before — every error looks the same to clients
+        func (s *Server) GetUser(ctx context.Context, req *pb.GetUserRequest) (*pb.User, error) {
+            user, err := s.db.FindUser(ctx, req.Id)
+            if err != nil {
+                return nil, status.Error(codes.Internal, err.Error())
+            }
+            return user, nil
+        }
+
+        // After — clients can react to specific failure modes
+        func (s *Server) GetUser(ctx context.Context, req *pb.GetUserRequest) (*pb.User, error) {
+            if req.Id == "" {
+                return nil, status.Error(codes.InvalidArgument, "user id is required")
+            }
+            user, err := s.db.FindUser(ctx, req.Id)
+            if errors.Is(err, db.ErrNotFound) {
+                return nil, status.Error(codes.NotFound, "user not found")
+            }
+            if err != nil {
+                return nil, status.Error(codes.Internal, "unexpected database error")
+            }
+            return user, nil
+        }
+    references:
+      - https://grpc.io/docs/guides/status-codes/
+      - https://pkg.go.dev/google.golang.org/grpc/codes
+
+  - id: go-grpc-error-no-status
+    name: Plain Go error returned from gRPC handler
+    description: >
+      Flags gRPC handler methods that return a plain Go error via
+      fmt.Errorf() instead of wrapping it with status.Error() or
+      status.Errorf(). The client receives codes.Unknown which provides
+      no actionable information.
+    descriptions:
+      business: >
+        This code returns raw internal error messages to other services,
+        which is like sending a mechanic's diagnostic readout to a
+        customer instead of a clear explanation. It also means your error
+        dashboards show one giant bucket of "unknown" errors with no way
+        to tell what went wrong. Without this fix, troubleshooting takes
+        longer and you risk leaking internal system details to callers.
+      developer: >
+        A plain fmt.Errorf is being returned from a gRPC handler instead
+        of status.Error/status.Errorf. What happens is the gRPC framework
+        wraps it as codes.Unknown, so the client has zero ability to
+        differentiate error types. The correct pattern is to always return
+        status.Error with an appropriate code so clients can handle each
+        failure mode programmatically.
+    rationale: >
+      When a gRPC handler returns a plain Go error, the gRPC framework
+      wraps it as codes.Unknown with the error string as the message.
+      This is the worst possible outcome for observability: the client
+      cannot distinguish error categories, monitoring dashboards show
+      a single bucket of "unknown" errors, and retry logic cannot make
+      informed decisions. Every error returned from a gRPC handler should
+      go through status.Error() or status.Errorf() with an appropriate
+      status code. This also prevents accidental leaking of internal
+      error details — status.Error() forces you to be intentional about
+      what message the client sees.
+    severity: warning
+    tags: [grpc, status-codes, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: return ..., fmt.Errorf(...)
+          - pattern-inside: |
+              func ($S $SERVER) $METHOD($CTX context.Context, $REQ $REQTYPE) ($RESP, error) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Wrap the error with status.Error() or status.Errorf() using an appropriate gRPC status code.
+      example: |
+        // Before — client receives codes.Unknown
+        func (s *Server) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.Order, error) {
+            order, err := s.orders.Create(ctx, req)
+            if err != nil {
+                return nil, fmt.Errorf("failed to create order: %w", err)
+            }
+            return order, nil
+        }
+
+        // After — client receives actionable status code
+        func (s *Server) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.Order, error) {
+            order, err := s.orders.Create(ctx, req)
+            if err != nil {
+                return nil, status.Errorf(codes.Internal, "failed to create order: %v", err)
+            }
+            return order, nil
+        }
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc/status
+      - https://grpc.io/docs/guides/error/
+
+  # ── Server configuration ───────────────────────────────────
+
+  - id: go-grpc-no-server-options
+    name: grpc.NewServer() called without ServerOption
+    description: >
+      Flags bare grpc.NewServer() calls with no ServerOption arguments.
+      A production gRPC server without interceptors is missing logging,
+      tracing, metrics, auth, and panic recovery.
+    descriptions:
+      business: >
+        This server is running without any safety net -- no logging, no
+        performance tracking, no authentication, and no crash protection.
+        Think of it like opening a store with no security cameras, no
+        cash register logs, and no locks on the doors. Without this fix,
+        you have zero visibility into what your service is doing, no way
+        to detect unauthorized access, and a single bad request can crash
+        the entire service.
+      developer: >
+        grpc.NewServer() is called with zero ServerOption arguments, which
+        means no interceptors are registered. What happens is you get a
+        server with no logging, no tracing, no metrics, no auth, and no
+        panic recovery. The correct pattern is to always pass a chain of
+        interceptors via grpc.ChainUnaryInterceptor and
+        grpc.ChainStreamInterceptor covering at minimum recovery, logging,
+        and tracing.
+    rationale: >
+      grpc.NewServer() with zero options creates a server with no
+      interceptors — no logging, no distributed tracing, no metrics
+      collection, no authentication, and no panic recovery. When this
+      server hits production, you get zero visibility into request
+      flow, no way to correlate failures across services, and a single
+      panicking handler takes down the entire process. At minimum, a
+      production server needs a recovery interceptor (to catch panics),
+      a logging interceptor (to record request/response metadata), and
+      a tracing interceptor (to propagate trace context). Libraries
+      like grpc-ecosystem/go-grpc-middleware provide these as composable
+      interceptors passed via grpc.UnaryInterceptor() and
+      grpc.StreamInterceptor().
+    severity: warning
+    tags: [grpc, interceptors, observability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: grpc.NewServer()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Add ServerOption arguments for interceptors (logging, tracing, recovery, auth).
+      example: |
+        // Before — no observability, no recovery, no auth
+        srv := grpc.NewServer()
+
+        // After — production-ready with interceptor chain
+        srv := grpc.NewServer(
+            grpc.ChainUnaryInterceptor(
+                recovery.UnaryServerInterceptor(),
+                otelgrpc.UnaryServerInterceptor(),
+                logging.UnaryServerInterceptor(logger),
+                auth.UnaryServerInterceptor(authFunc),
+            ),
+            grpc.ChainStreamInterceptor(
+                recovery.StreamServerInterceptor(),
+                otelgrpc.StreamServerInterceptor(),
+                logging.StreamServerInterceptor(logger),
+            ),
+        )
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc#NewServer
+      - https://github.com/grpc-ecosystem/go-grpc-middleware
+
+  # ── Client configuration ───────────────────────────────────
+
+  - id: go-grpc-dial-no-options
+    name: grpc.Dial/NewClient called without DialOption
+    description: >
+      Flags grpc.Dial() or grpc.NewClient() calls with only a target
+      address and no DialOption arguments. Missing TLS, keepalive,
+      load balancing, and interceptor configuration.
+    descriptions:
+      business: >
+        This service is connecting to other services with no encryption,
+        no connection health monitoring, and no load distribution. Think
+        of it like sending sensitive business mail via postcard instead of
+        sealed envelope -- anyone on the network can read it. Without this
+        fix, connections silently die after idle periods causing random
+        failures, and all traffic hits a single backend creating a
+        bottleneck.
+      developer: >
+        grpc.Dial or grpc.NewClient is called with only a target address
+        and no DialOption arguments. What happens is you get plaintext
+        transport (no TLS), no keepalive (connections die silently behind
+        load balancers), no client-side balancing, and no interceptors.
+        The correct pattern is to always configure transport credentials,
+        keepalive parameters, and at minimum a tracing interceptor.
+    rationale: >
+      A gRPC client connection without DialOptions uses no TLS (plaintext
+      by default in older API versions), no keepalive (connections silently
+      die behind load balancers), no client-side load balancing (all
+      requests hit a single backend), and no interceptors (no tracing
+      propagation, no retry logic). In production, this means requests
+      fail silently after idle periods, traces break at service
+      boundaries, and you have no client-side metrics. At minimum,
+      configure transport credentials, keepalive parameters, and a
+      tracing interceptor.
+    severity: warning
+    tags: [grpc, client, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: grpc.Dial($TARGET)
+          - pattern: grpc.NewClient($TARGET)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Add DialOption arguments for TLS, keepalive, load balancing, and interceptors.
+      example: |
+        // Before — no TLS, no keepalive, no tracing
+        conn, err := grpc.Dial("orders:50051")
+
+        // After — production-ready client connection
+        conn, err := grpc.NewClient("orders:50051",
+            grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+            grpc.WithKeepaliveParams(keepalive.ClientParameters{
+                Time:                10 * time.Second,
+                Timeout:             3 * time.Second,
+                PermitWithoutStream: true,
+            }),
+            grpc.WithChainUnaryInterceptor(
+                otelgrpc.UnaryClientInterceptor(),
+                retry.UnaryClientInterceptor(),
+            ),
+        )
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc#Dial
+      - https://pkg.go.dev/google.golang.org/grpc#NewClient
+
+  # ── Security ───────────────────────────────────────────────
+
+  - id: go-grpc-insecure-credentials
+    name: Insecure gRPC credentials in non-test code
+    description: >
+      Flags usage of grpc.WithInsecure() or insecure.NewCredentials()
+      outside of test files. Disables TLS for gRPC connections, sending
+      all data (including auth tokens) in plaintext.
+    descriptions:
+      business: >
+        This code sends all data between services completely unencrypted,
+        including authentication tokens and customer data. Think of it
+        like discussing confidential business deals on speakerphone in a
+        crowded coffee shop. Without this fix, any compromised network
+        component can read and modify your traffic, creating a serious
+        security and compliance liability.
+      developer: >
+        grpc.WithInsecure() or insecure.NewCredentials() is used outside
+        of test code, which disables TLS entirely. What happens is every
+        RPC -- including those carrying auth tokens and PII -- travels in
+        plaintext over the network. The correct pattern is to use proper
+        TLS credentials (or mTLS in service mesh environments) and reserve
+        insecure credentials exclusively for local dev and tests.
+    rationale: >
+      grpc.WithInsecure() and insecure.NewCredentials() disable TLS
+      entirely on the gRPC connection. Every RPC — including those
+      carrying authentication tokens, PII, and business-critical data —
+      travels in plaintext. In a cloud environment, this means any
+      compromised network hop (a sidecar, a service mesh proxy, a
+      misconfigured load balancer) can read and modify your traffic.
+      Even in "internal" networks, zero-trust architecture demands
+      encryption in transit. Use TLS certificates (mTLS in service mesh
+      environments) and reserve insecure credentials exclusively for
+      local development and test code.
+    severity: error
+    tags: [grpc, security, tls]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: grpc.WithInsecure()
+          - pattern: insecure.NewCredentials()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/*_test.go"]
+    fix:
+      message: Use grpc.WithTransportCredentials() with proper TLS configuration instead of insecure credentials.
+      example: |
+        // Before — all traffic in plaintext
+        conn, err := grpc.NewClient("orders:50051",
+            grpc.WithTransportCredentials(insecure.NewCredentials()),
+        )
+
+        // After — TLS-encrypted connection
+        creds, err := credentials.NewClientTLSFromFile("ca.pem", "orders")
+        if err != nil {
+            return fmt.Errorf("loading TLS credentials: %w", err)
+        }
+        conn, err := grpc.NewClient("orders:50051",
+            grpc.WithTransportCredentials(creds),
+        )
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc/credentials
+      - https://grpc.io/docs/guides/auth/#with-server-authentication-ssltls
+
+  # ── Connection lifecycle ───────────────────────────────────
+
+  - id: go-grpc-connection-not-closed
+    name: gRPC client connection opened without defer Close()
+    description: >
+      Flags grpc.Dial() or grpc.NewClient() calls that are not followed
+      by a defer conn.Close() in the same function. The connection will
+      leak file descriptors and goroutines.
+    descriptions:
+      business: >
+        This code opens a network connection but never cleans it up, which
+        is like leaving every faucet running after you wash your hands.
+        Over time the system accumulates thousands of abandoned connections
+        until it runs out of resources and crashes. Without this fix, your
+        service will experience progressively worsening performance and
+        eventually go down entirely.
+      developer: >
+        A gRPC client connection is opened via grpc.Dial or grpc.NewClient
+        without a corresponding defer conn.Close(). What happens is the
+        HTTP/2 connection pool, background goroutines, and file descriptors
+        all leak. The correct pattern is to always defer conn.Close()
+        immediately after the error check, identical to the os.Open /
+        defer f.Close() idiom.
+    rationale: >
+      A gRPC client connection maintains a pool of HTTP/2 connections,
+      background goroutines for health checking and keepalive, and file
+      descriptors for each underlying TCP socket. If you forget to close
+      it, all of these resources leak. In a long-running service that
+      creates connections per-request (an anti-pattern itself, but
+      common in poorly structured code), this leads to file descriptor
+      exhaustion, goroutine leaks that eat memory, and eventually the
+      process crashes or the OS refuses new connections. Always defer
+      conn.Close() immediately after a successful Dial/NewClient call,
+      following the same pattern as os.Open/defer f.Close().
+    severity: warning
+    tags: [grpc, resource-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  $CONN, $ERR := grpc.Dial(...)
+              - pattern-not-inside: |
+                  $CONN, $ERR := grpc.Dial(...)
+                  ...
+                  defer $CONN.Close()
+          - patterns:
+              - pattern: |
+                  $CONN, $ERR := grpc.NewClient(...)
+              - pattern-not-inside: |
+                  $CONN, $ERR := grpc.NewClient(...)
+                  ...
+                  defer $CONN.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Add defer conn.Close() immediately after the error check following grpc.Dial/grpc.NewClient.
+      example: |
+        // Before — connection leaked
+        conn, err := grpc.NewClient("orders:50051", opts...)
+        if err != nil {
+            return fmt.Errorf("connecting to orders: %w", err)
+        }
+        client := pb.NewOrderServiceClient(conn)
+
+        // After — connection properly cleaned up
+        conn, err := grpc.NewClient("orders:50051", opts...)
+        if err != nil {
+            return fmt.Errorf("connecting to orders: %w", err)
+        }
+        defer conn.Close()
+        client := pb.NewOrderServiceClient(conn)
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc#ClientConn.Close
+      - https://pkg.go.dev/google.golang.org/grpc#Dial
+
+  # ── Reliability ─────────────────────────────────────────────
+
+  - id: go-grpc-no-keepalive
+    name: gRPC client without keepalive parameters
+    description: >
+      Flags grpc.Dial() or grpc.NewClient() calls that include
+      DialOption arguments but do not include
+      grpc.WithKeepaliveParams(). Long-lived connections may be
+      silently dropped by load balancers or firewalls.
+    descriptions:
+      business: >
+        This connection has no heartbeat mechanism, so it can silently
+        die without anyone noticing. Think of it like a phone call where
+        the line drops but neither side hears a dial tone -- you keep
+        talking to nobody. Without this fix, your service will experience
+        intermittent, hard-to-reproduce failures that only appear after
+        quiet periods, typically surfacing at night or on weekends.
+      developer: >
+        A gRPC client connection is configured with DialOptions but lacks
+        grpc.WithKeepaliveParams(). What happens is cloud load balancers
+        and firewalls silently close idle TCP connections after 60-350
+        seconds, and the client does not detect the dead connection until
+        the next RPC fails. The correct pattern is to set keepalive Time
+        shorter than your LB idle timeout so dead connections are detected
+        and replaced proactively.
+    rationale: >
+      Cloud load balancers (AWS ALB/NLB, GCP L4 ILB, Envoy) and
+      firewalls silently close idle TCP connections after a timeout
+      (often 60-350 seconds). Without gRPC keepalive pings, the client
+      has no way to detect that the connection is dead until the next
+      RPC attempt, which then fails with "transport is closing" or
+      "connection refused." This causes intermittent, hard-to-reproduce
+      failures that only appear after idle periods — exactly the kind
+      of bug that slips through testing and surfaces at 3am in
+      production. Keepalive pings proactively detect dead connections
+      and trigger reconnection before the next RPC needs the connection.
+      Set Time to something shorter than your load balancer's idle
+      timeout (e.g., 10s for a 60s LB timeout).
+    severity: info
+    tags: [grpc, client, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: grpc.Dial($TARGET, $...OPTS)
+              - pattern: grpc.NewClient($TARGET, $...OPTS)
+          - pattern-not: grpc.Dial($TARGET)
+          - pattern-not: grpc.NewClient($TARGET)
+          - pattern-not-inside: |
+              ... grpc.WithKeepaliveParams(...) ...
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Add grpc.WithKeepaliveParams() to prevent silent connection drops behind load balancers.
+      example: |
+        // Before — connection silently dies after LB idle timeout
+        conn, err := grpc.NewClient("orders:50051",
+            grpc.WithTransportCredentials(creds),
+        )
+
+        // After — keepalive pings detect dead connections
+        conn, err := grpc.NewClient("orders:50051",
+            grpc.WithTransportCredentials(creds),
+            grpc.WithKeepaliveParams(keepalive.ClientParameters{
+                Time:                10 * time.Second,
+                Timeout:             3 * time.Second,
+                PermitWithoutStream: true,
+            }),
+        )
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc/keepalive
+      - https://grpc.io/docs/guides/keepalive/
+
+  - id: go-grpc-no-health-check
+    name: gRPC server without health check service
+    description: >
+      Flags grpc.NewServer() calls that are not followed by a
+      grpc_health_v1.RegisterHealthServer() call in the same function.
+      Kubernetes and load balancers cannot determine service readiness
+      without the standard gRPC health check.
+    descriptions:
+      business: >
+        This service has no way to tell the infrastructure whether it is
+        healthy and ready to handle requests. Think of it like a
+        restaurant with no "open/closed" sign -- customers walk in during
+        setup and get a bad experience. Without this fix, traffic gets
+        sent to servers that are still starting up or have lost their
+        database connection, causing errors for real users.
+      developer: >
+        A gRPC server is created without registering the standard health
+        check service (grpc_health_v1.RegisterHealthServer). What happens
+        is Kubernetes liveness/readiness probes fall back to TCP checks,
+        which only verify the port is open, not that the server can
+        actually handle RPCs. The correct pattern is to register the
+        health server and update its serving status as dependencies
+        become available.
+    rationale: >
+      The gRPC health checking protocol is the standard mechanism for
+      load balancers, service meshes, and Kubernetes to determine if a
+      gRPC server is ready to receive traffic. Without it, Kubernetes
+      liveness/readiness probes fall back to TCP checks, which only
+      verify the port is open — not that the server is actually ready
+      to handle RPCs. This means traffic gets routed to servers that
+      are still initializing, have lost database connections, or are in
+      a degraded state. The health check service also enables
+      client-side health checking via the grpc.WithDefaultServiceConfig
+      option, allowing clients to avoid sending RPCs to unhealthy
+      backends. Register the health server and update its status as
+      your service's dependencies become available.
+    severity: info
+    tags: [grpc, health-check, kubernetes]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              $SERVER := grpc.NewServer(...)
+          - pattern-not-inside: |
+              $SERVER := grpc.NewServer(...)
+              ...
+              grpc_health_v1.RegisterHealthServer($SERVER, ...)
+          - pattern-not-inside: |
+              $SERVER := grpc.NewServer(...)
+              ...
+              healthgrpc.RegisterHealthServer($SERVER, ...)
+          - pattern-not-inside: |
+              $SERVER := grpc.NewServer(...)
+              ...
+              healthpb.RegisterHealthServer($SERVER, ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Register the gRPC health check service so Kubernetes and load balancers can probe readiness.
+      example: |
+        // Before — Kubernetes cannot check service health
+        srv := grpc.NewServer(opts...)
+        pb.RegisterOrderServiceServer(srv, orderSvc)
+        srv.Serve(lis)
+
+        // After — standard gRPC health check enabled
+        srv := grpc.NewServer(opts...)
+        pb.RegisterOrderServiceServer(srv, orderSvc)
+
+        healthSrv := health.NewServer()
+        grpc_health_v1.RegisterHealthServer(srv, healthSrv)
+        healthSrv.SetServingStatus("orders.OrderService", grpc_health_v1.HealthCheckResponse_SERVING)
+
+        srv.Serve(lis)
+    references:
+      - https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+      - https://pkg.go.dev/google.golang.org/grpc/health
+
+  # ── Streaming ──────────────────────────────────────────────
+
+  - id: go-grpc-stream-no-context-cancel
+    name: gRPC stream Recv() loop without context cancellation check
+    description: >
+      Flags gRPC streaming receive loops that call Recv() without
+      checking the stream's context for cancellation. The loop may
+      block indefinitely if the client disconnects.
+    descriptions:
+      business: >
+        This code can get stuck forever when a client disconnects,
+        holding onto server resources like a phone call where one side
+        hangs up but the other keeps talking. Under heavy traffic, these
+        stuck connections pile up until the server runs out of capacity
+        and stops serving all customers. Without this fix, client
+        disconnections gradually degrade your service until it needs a
+        restart.
+      developer: >
+        A gRPC streaming Recv() loop does not check stream.Context() for
+        cancellation. What happens is when the client disconnects, the
+        server goroutine remains blocked on whatever work it is doing
+        between Recv() calls, leaking resources until the next Recv()
+        finally returns an error. The correct pattern is to check
+        stream.Context().Err() at the top of each loop iteration or use
+        select with stream.Context().Done() in processing logic.
+    rationale: >
+      When a gRPC client disconnects or cancels its context, the
+      server-side stream's context is cancelled. However, if the
+      server is blocked on a long-running operation between Recv()
+      calls (e.g., database query, external API call), it won't
+      notice the cancellation until the next Recv() returns an error.
+      This can leave goroutines hanging for minutes or longer, holding
+      resources and contributing to goroutine leaks under load. Always
+      check stream.Context().Err() or use select with
+      stream.Context().Done() in your processing logic to detect
+      client disconnection promptly. This is especially critical in
+      bidirectional streaming where the server does significant work
+      between receives.
+    severity: warning
+    tags: [grpc, streaming, context]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              for {
+                ...
+                $MSG, $ERR := $STREAM.Recv()
+                ...
+              }
+          - pattern-not-inside: |
+              for {
+                ...
+                $STREAM.Context().Err()
+                ...
+              }
+          - pattern-not-inside: |
+              for {
+                ...
+                $STREAM.Context().Done()
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Check stream.Context().Err() or select on stream.Context().Done() in the receive loop.
+      example: |
+        // Before — blocks indefinitely if client disconnects
+        for {
+            msg, err := stream.Recv()
+            if err == io.EOF {
+                break
+            }
+            if err != nil {
+                return err
+            }
+            processMessage(msg)
+        }
+
+        // After — detects client disconnection promptly
+        for {
+            if err := stream.Context().Err(); err != nil {
+                return status.Error(codes.Canceled, "client disconnected")
+            }
+            msg, err := stream.Recv()
+            if err == io.EOF {
+                break
+            }
+            if err != nil {
+                return err
+            }
+            processMessage(msg)
+        }
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc#ServerStream
+      - https://grpc.io/docs/languages/go/basics/#server-side-streaming-rpc
+
+  # ── Message size ───────────────────────────────────────────
+
+  - id: go-grpc-large-message-no-option
+    name: gRPC client without MaxCallRecvMsgSize option
+    description: >
+      Flags grpc.Dial() or grpc.NewClient() calls that include
+      DialOption arguments but do not configure
+      grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(...)). The
+      default 4MB limit will cause silent failures for large responses.
+    descriptions:
+      business: >
+        This connection will silently reject any response larger than 4MB,
+        which is a time bomb that works fine in development with small
+        datasets but fails in production when data naturally grows. Think
+        of it like a mailbox that can only hold small letters -- once your
+        business sends a larger package, it just gets rejected with a
+        confusing error. Without this fix, features that work today will
+        break mysteriously as your data scales.
+      developer: >
+        A gRPC client connection is configured without setting
+        MaxCallRecvMsgSize, which defaults to 4MB. What happens is
+        responses exceeding this limit fail with a cryptic "received
+        message larger than max" error, with no indication of the actual
+        size. The correct pattern is to explicitly set
+        grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(...)) to a
+        value that accommodates your largest expected response with
+        headroom.
+    rationale: >
+      The default maximum receive message size in gRPC-Go is 4MB
+      (4 * 1024 * 1024 bytes). When a response exceeds this limit,
+      the client receives a cryptic "grpc: received message larger
+      than max" error with no indication of what the actual message
+      size was or how to fix it. This is a production time bomb: your
+      service works fine in development with small datasets, then
+      fails in production when a response naturally grows past 4MB
+      (e.g., a list endpoint returning more records, a report
+      containing more data). Even if you don't expect large messages
+      today, explicitly setting the limit documents the expected
+      ceiling and makes the failure mode obvious when it's exceeded.
+      Set it to a value that accommodates your largest expected
+      response with headroom, or set per-RPC limits for specific
+      large-payload endpoints.
+    severity: info
+    tags: [grpc, client, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: grpc.Dial($TARGET, $...OPTS)
+              - pattern: grpc.NewClient($TARGET, $...OPTS)
+          - pattern-not: grpc.Dial($TARGET)
+          - pattern-not: grpc.NewClient($TARGET)
+          - pattern-not-inside: |
+              ... grpc.MaxCallRecvMsgSize(...) ...
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Add grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(...)) to configure the maximum receive message size.
+      example: |
+        // Before — silently fails when response exceeds 4MB
+        conn, err := grpc.NewClient("reports:50051",
+            grpc.WithTransportCredentials(creds),
+        )
+
+        // After — explicit limit with headroom
+        conn, err := grpc.NewClient("reports:50051",
+            grpc.WithTransportCredentials(creds),
+            grpc.WithDefaultCallOptions(
+                grpc.MaxCallRecvMsgSize(16*1024*1024), // 16MB
+            ),
+        )
+    references:
+      - https://pkg.go.dev/google.golang.org/grpc#MaxCallRecvMsgSize
+      - https://pkg.go.dev/google.golang.org/grpc#WithDefaultCallOptions

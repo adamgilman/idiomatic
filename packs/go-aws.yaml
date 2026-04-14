@@ -1,0 +1,658 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-aws
+  name: Go AWS SDK
+  version: 0.1.0
+  description: >
+    Principal-level AWS SDK rules for Go services. Catches credential
+    mismanagement, missing pagination, client lifecycle anti-patterns,
+    and configuration gaps that cause security incidents, data loss,
+    or unexpected AWS bills in production.
+  descriptions:
+    business: >
+      Your services depend on AWS for storage, messaging, and compute.
+      This pack catches the SDK usage mistakes that lead to surprise bills,
+      silent data loss, and security vulnerabilities — like credentials left
+      in code or API results silently cut off. These issues typically pass
+      code review because the code "works" in development, then fail at
+      production scale.
+    developer: >
+      The AWS SDK v2 for Go is well-designed but has defaults that bite
+      you at scale — no pagination means truncated results, clients created
+      per-request means cold starts, and context.Background() means no
+      cancellation. These rules enforce the patterns that principal engineers
+      learn after their first production incident with each AWS service.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-aws.yaml
+  tags:
+    language: go
+    vendor: aws
+    category: cloud-sdk
+    architecture: [services, workers, serverless]
+
+rules:
+  # ── Security ───────────────────────────────────────────────────
+
+  - id: go-aws-hardcoded-credentials
+    name: Hardcoded AWS credentials
+    description: >
+      Flags AWS access keys or secret keys configured as string literals
+      in source code via static credential providers.
+    descriptions:
+      business: >
+        This code has AWS credentials — essentially master keys to your
+        cloud account — written directly into the source code. Think of it
+        like writing the combination to your office safe on a sticky note
+        and photocopying it to everyone with access to the codebase.
+        Automated scanners trawl public repositories and exploit leaked
+        keys within minutes, leading to unauthorized access and potentially
+        massive AWS bills.
+      developer: >
+        Static credential providers with string literals mean the access key
+        and secret key are baked into the binary and version control history.
+        Even if you rotate, the old key lives in git forever. The correct
+        pattern is always the default credential chain — it checks IAM roles
+        (EC2 instance profiles, ECS task roles, Lambda execution roles),
+        environment variables, and ~/.aws/credentials in that order with
+        zero code changes between environments.
+    rationale: >
+      Hardcoded AWS credentials in source code end up in version control,
+      CI logs, and container images. Anyone with repository access can
+      assume your IAM identity. AWS credential leaks are the #1 cause of
+      cloud security incidents — automated scanners trawl public repos
+      and exploit leaked keys within minutes. Use IAM roles (EC2 instance
+      profiles, ECS task roles, Lambda execution roles) or environment
+      variables via the default credential chain.
+    severity: error
+    tags: [aws, security, credentials]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: 'credentials.NewStaticCredentialsProvider("...", "...", "...")'
+          - pattern: |
+              aws.Credentials{..., AccessKeyID: "...", ...}
+          - pattern: |
+              aws.Credentials{..., SecretAccessKey: "...", ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Remove hardcoded credentials. Use IAM roles or the default credential chain.
+      example: |
+        // Before — credentials in source code
+        cfg, err := config.LoadDefaultConfig(ctx,
+            config.WithCredentialsProvider(
+                credentials.NewStaticCredentialsProvider("AKIAIOSFODNN7EXAMPLE", "secret", ""),
+            ),
+        )
+
+        // After — default credential chain (IAM role, env vars, ~/.aws/credentials)
+        cfg, err := config.LoadDefaultConfig(ctx)
+    references:
+      - https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-gosdk.html
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html
+
+  # ── Configuration ──────────────────────────────────────────────
+
+  - id: go-aws-hardcoded-region
+    name: Hardcoded AWS region
+    description: >
+      Flags AWS region configured as a string literal. Region should come
+      from configuration or environment variables for portability.
+    descriptions:
+      business: >
+        This code locks your service to a specific AWS region (like
+        us-east-1) in the source code itself. If that region has an outage,
+        you cannot fail over to a backup region without changing code and
+        redeploying. It also means your staging and production environments
+        cannot use different regions, making disaster recovery testing
+        harder and increasing your downtime risk.
+      developer: >
+        config.WithRegion("us-east-1") hardcodes the region into the binary.
+        You cannot promote the same artifact from staging to production if
+        they use different regions without recompilation. The SDK already
+        reads AWS_REGION from the environment via the default credential
+        chain — just call config.LoadDefaultConfig(ctx) with no region
+        override and set the region per environment.
+    rationale: >
+      Hardcoded regions couple your binary to a specific AWS region. You
+      cannot deploy the same artifact to a DR region, run multi-region,
+      or promote from staging (us-west-2) to production (us-east-1)
+      without recompilation. The AWS SDK default credential chain already
+      reads AWS_REGION from the environment — use it.
+    severity: warning
+    tags: [aws, configuration, twelve-factor]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: config.WithRegion("...")
+          - pattern: |
+              aws.Config{..., Region: "...", ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Load region from AWS_REGION environment variable or default config.
+      example: |
+        // Before
+        cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+
+        // After — reads AWS_REGION from environment
+        cfg, err := config.LoadDefaultConfig(ctx)
+    references:
+      - https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-gosdk.html
+
+  # ── S3 ─────────────────────────────────────────────────────────
+
+  - id: go-aws-s3-no-content-type
+    name: S3 PutObject without ContentType
+    description: >
+      Flags S3 PutObjectInput without a ContentType field. Files served
+      from S3 will have an incorrect or missing MIME type.
+    descriptions:
+      business: >
+        This code uploads files to S3 storage without telling S3 what type
+        of file it is. Think of it like mailing a package without a label —
+        the recipient has to guess what is inside. Without this fix, users
+        downloading these files will see broken images, PDFs that download
+        instead of displaying, and HTML pages that render as raw text.
+        Customer support tickets will follow.
+      developer: >
+        PutObjectInput without ContentType defaults to
+        application/octet-stream. What happens is browsers and CDNs treat
+        the object as a generic binary blob — no inline rendering, no
+        correct caching headers, no MIME-based routing. The correct pattern
+        is always setting ContentType explicitly to the appropriate MIME
+        type (e.g., "application/pdf", "image/png") on every PutObject call.
+    rationale: >
+      When you upload an object to S3 without setting ContentType, S3
+      defaults to application/octet-stream. If the object is served via
+      CloudFront or direct S3 URLs, browsers won't render HTML, won't
+      display images inline, and CDN caching rules based on content type
+      won't apply. This is a silent bug that only manifests in production
+      when users report broken downloads or display issues.
+    severity: warning
+    tags: [aws, s3, content-type]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              &s3.PutObjectInput{...}
+          - pattern-not: |
+              &s3.PutObjectInput{..., ContentType: $T, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Set ContentType on PutObjectInput to the appropriate MIME type.
+      example: |
+        // Before — defaults to application/octet-stream
+        input := &s3.PutObjectInput{
+            Bucket: aws.String("my-bucket"),
+            Key:    aws.String("report.pdf"),
+            Body:   file,
+        }
+
+        // After
+        input := &s3.PutObjectInput{
+            Bucket:      aws.String("my-bucket"),
+            Key:         aws.String("report.pdf"),
+            Body:        file,
+            ContentType: aws.String("application/pdf"),
+        }
+    references:
+      - https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/s3#PutObjectInput
+
+  # ── Pagination ─────────────────────────────────────────────────
+
+  - id: go-aws-list-not-paginated
+    name: AWS list operation without pagination
+    description: >
+      Flags direct calls to AWS list operations (ListObjectsV2,
+      ListTables, DescribeInstances, etc.) without using a Paginator.
+      Results are silently truncated at the API page size limit.
+    descriptions:
+      business: >
+        This code asks AWS for a list of items but only gets the first page
+        of results — like asking your bank for a transaction history and
+        only getting the most recent 1,000 entries with no indication
+        there are more. The code works perfectly in development with small
+        datasets and silently loses data in production once you cross the
+        page-size threshold. This is a data-loss bug that is invisible
+        until scale exposes it.
+      developer: >
+        AWS list APIs return at most 1,000 items per call (S3, DynamoDB
+        Scan, etc.). Calling ListObjectsV2 directly without a Paginator
+        silently truncates results — no error, no warning. What happens is
+        your code processes 1,000 items and ignores the rest. The correct
+        pattern is always using the SDK's Paginator types
+        (e.g., s3.NewListObjectsV2Paginator) which handle continuation
+        tokens automatically.
+    rationale: >
+      Most AWS list APIs return at most 1000 items per call. If you have
+      1001 objects in an S3 bucket, a single ListObjectsV2 call returns
+      1000 and you silently lose the last one. This is a data-loss bug
+      that only manifests at scale — it works perfectly in dev with 50
+      objects and breaks in production with 5000. The AWS SDK v2 provides
+      Paginator types for exactly this purpose.
+    severity: warning
+    tags: [aws, pagination, data-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $CLIENT.ListObjectsV2($CTX, ...)
+          - pattern: $CLIENT.ListBuckets($CTX, ...)
+          - pattern: $CLIENT.ListTables($CTX, ...)
+          - pattern: $CLIENT.DescribeInstances($CTX, ...)
+          - pattern: $CLIENT.ListFunctions($CTX, ...)
+          - pattern: $CLIENT.ListQueues($CTX, ...)
+          - pattern: $CLIENT.Scan($CTX, ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use the corresponding Paginator type instead of calling the API directly.
+      example: |
+        // Before — silently truncated at 1000 objects
+        output, err := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+            Bucket: aws.String("my-bucket"),
+        })
+
+        // After — iterates all pages
+        paginator := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
+            Bucket: aws.String("my-bucket"),
+        })
+        for paginator.HasMorePages() {
+            page, err := paginator.NextPage(ctx)
+            if err != nil { return err }
+            for _, obj := range page.Contents {
+                // process each object
+            }
+        }
+    references:
+      - https://aws.github.io/aws-sdk-go-v2/docs/making-requests/#using-paginators
+
+  # ── Context ────────────────────────────────────────────────────
+
+  - id: go-aws-no-context
+    name: AWS SDK call with context.Background()
+    description: >
+      Flags AWS SDK calls using context.Background() instead of a
+      request-scoped context. Operations cannot be cancelled on timeout.
+    descriptions:
+      business: >
+        This code makes AWS calls that cannot be cancelled when a user
+        navigates away or a request times out. Think of it like placing
+        a phone call you cannot hang up — if AWS is slow, the call just
+        waits indefinitely, tying up server resources. Under load, these
+        unkillable calls pile up, eventually exhausting your server
+        capacity and causing a service outage for all users.
+      developer: >
+        context.Background() was used instead of the request-scoped
+        context. What happens is the AWS call ignores cancellation signals
+        — if the HTTP client disconnects or the request deadline passes,
+        the goroutine keeps waiting on AWS (up to 30+ seconds with
+        retries). The correct pattern is always passing the request context
+        (ctx from the handler or parent function) so AWS calls are
+        cancelled when the parent operation times out.
+    rationale: >
+      context.Background() never cancels. If the AWS API is slow or
+      unreachable, the call blocks until the SDK's own retry timeout
+      expires (which can be 30+ seconds with retries). In an HTTP handler,
+      the user has already given up and the goroutine is wasting resources.
+      Pass the request context so AWS calls are cancelled when the parent
+      request times out or the client disconnects.
+    severity: warning
+    tags: [aws, context, timeout]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $CLIENT.GetObject(context.Background(), ...)
+              - pattern: $CLIENT.PutObject(context.Background(), ...)
+              - pattern: $CLIENT.DeleteObject(context.Background(), ...)
+              - pattern: $CLIENT.SendMessage(context.Background(), ...)
+              - pattern: $CLIENT.ReceiveMessage(context.Background(), ...)
+              - pattern: $CLIENT.Publish(context.Background(), ...)
+              - pattern: $CLIENT.GetItem(context.Background(), ...)
+              - pattern: $CLIENT.PutItem(context.Background(), ...)
+              - pattern: $CLIENT.Query(context.Background(), ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Pass the request-scoped context instead of context.Background().
+      example: |
+        // Before — cannot be cancelled
+        output, err := s3Client.GetObject(context.Background(), input)
+
+        // After
+        output, err := s3Client.GetObject(ctx, input)
+    references:
+      - https://aws.github.io/aws-sdk-go-v2/docs/making-requests/
+
+  # ── Client lifecycle ───────────────────────────────────────────
+
+  - id: go-aws-client-in-handler
+    name: AWS client created inside request handler
+    description: >
+      Flags AWS service client creation inside HTTP handlers or Lambda-style
+      functions. Clients should be created once at startup and reused.
+    descriptions:
+      business: >
+        This code creates a new AWS connection for every single user
+        request, instead of reusing one. Think of it like hanging up the
+        phone and redialing after every sentence in a conversation. This
+        adds latency to every request (users notice the slowdown), wastes
+        network connections, and in AWS Lambda it turns every invocation
+        into a cold start — increasing both response times and your
+        AWS bill.
+      developer: >
+        NewFromConfig() was called inside an HTTP handler. What happens
+        is a new credential resolution (potentially hitting IMDS or STS),
+        a new connection pool, and a new retry state on every request.
+        The correct pattern is always creating the client at package
+        level or in a constructor, then injecting it into handlers. The
+        SDK client is concurrency-safe and designed to be long-lived.
+    rationale: >
+      AWS SDK clients hold connection pools, credential caches, and retry
+      state. Creating a new client per request discards all of that and
+      forces a new credential resolution (which may hit IMDS or STS) on
+      every call. In Lambda, this turns every invocation into a cold start.
+      In HTTP services, it wastes TCP connections and adds latency. Create
+      clients at package level or in constructors.
+    severity: warning
+    tags: [aws, performance, lambda]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: s3.NewFromConfig(...)
+              - pattern: sqs.NewFromConfig(...)
+              - pattern: dynamodb.NewFromConfig(...)
+              - pattern: sns.NewFromConfig(...)
+              - pattern: lambda.NewFromConfig(...)
+              - pattern: ses.NewFromConfig(...)
+              - pattern: secretsmanager.NewFromConfig(...)
+          - pattern-inside: |
+              func $HANDLER($W http.ResponseWriter, $R *http.Request) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Create AWS clients at startup and inject them into handlers.
+      example: |
+        // Before — new client per request
+        func handleUpload(w http.ResponseWriter, r *http.Request) {
+            client := s3.NewFromConfig(cfg)
+            client.PutObject(r.Context(), input)
+        }
+
+        // After — client created once, reused
+        var s3Client *s3.Client
+
+        func init() {
+            cfg, _ := config.LoadDefaultConfig(context.Background())
+            s3Client = s3.NewFromConfig(cfg)
+        }
+
+        func handleUpload(w http.ResponseWriter, r *http.Request) {
+            s3Client.PutObject(r.Context(), input)
+        }
+    references:
+      - https://aws.github.io/aws-sdk-go-v2/docs/configuring-sdk/
+
+  # ── SQS ────────────────────────────────────────────────────────
+
+  - id: go-aws-sqs-delete-before-process
+    name: SQS message deleted before processing
+    description: >
+      Flags SQS DeleteMessage called before the message has been fully
+      processed. If processing fails after deletion, the message is
+      permanently lost.
+    descriptions:
+      business: >
+        This code deletes a message from the queue before finishing
+        the work it represents. Think of it like shredding a customer
+        order before you have actually fulfilled it — if anything goes
+        wrong during processing, the order is gone forever with no way
+        to recover or retry. This leads to silent data loss: orders not
+        fulfilled, payments not processed, notifications never sent.
+      developer: >
+        DeleteMessage was called before the processing logic. What happens
+        is the SQS visibility timeout safety net is removed — if the
+        process crashes between delete and completion, the message is
+        permanently lost with no trace. The correct pattern is always
+        process-then-delete: complete all processing, confirm success,
+        then delete the message from the queue.
+    rationale: >
+      SQS visibility timeout is your safety net — if a consumer crashes,
+      the message reappears for another consumer. Deleting before
+      processing removes that safety net. If the consumer crashes between
+      delete and process completion, the message is gone forever with no
+      trace. The correct pattern is always process-then-delete.
+    severity: error
+    tags: [aws, sqs, message-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          $CLIENT.DeleteMessage($CTX, ...)
+          ...
+          $PROCESS($MSG)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move DeleteMessage after message processing is complete.
+      example: |
+        // Before — message lost if processing fails
+        sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+            QueueUrl:      queueURL,
+            ReceiptHandle: msg.ReceiptHandle,
+        })
+        processMessage(msg)
+
+        // After
+        processMessage(msg)
+        sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+            QueueUrl:      queueURL,
+            ReceiptHandle: msg.ReceiptHandle,
+        })
+    references:
+      - https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html
+
+  # ── DynamoDB ───────────────────────────────────────────────────
+
+  - id: go-aws-dynamodb-scan
+    name: DynamoDB Scan operation used
+    description: >
+      Flags DynamoDB Scan calls. Scans read every item in the table and
+      are expensive at scale.
+    descriptions:
+      business: >
+        This code reads every single record in a database table to find
+        the ones it needs. Think of it like reading every book in a
+        library to find one author, instead of checking the catalog. This
+        costs real money — a 10-million-row table costs roughly $5 per
+        full scan in on-demand mode — and it gets slower as your data
+        grows. Worse, it can starve other real-time queries of capacity,
+        causing slowdowns for all users.
+      developer: >
+        DynamoDB Scan reads every item in the table, consuming read
+        capacity proportional to table size (not result size). What
+        happens is it works fast with 100 items in dev, then crushes
+        your provisioned read capacity or racks up on-demand costs in
+        production. The correct pattern is always Query with a partition
+        key, or creating a Global Secondary Index for your access pattern.
+        Scan is only acceptable in one-off migration scripts.
+    rationale: >
+      A DynamoDB Scan reads every single item in the table, consumes
+      read capacity proportional to table size (not result size), and
+      gets slower as the table grows. A 10M item table costs ~$5 per
+      full scan in on-demand mode. In provisioned mode, scans consume
+      all your read capacity and throttle real-time queries. Use Query
+      with a partition key, or create a Global Secondary Index. Scans
+      are only acceptable for one-time migration scripts.
+    severity: warning
+    tags: [aws, dynamodb, cost, performance]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $CLIENT.Scan($CTX, ...)
+          - pattern-not-inside: |
+              func Test$F(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use Query with a partition key condition instead of Scan.
+      example: |
+        // Before — reads every item, O(table size)
+        output, err := client.Scan(ctx, &dynamodb.ScanInput{
+            TableName: aws.String("orders"),
+        })
+
+        // After — reads only matching items, O(result size)
+        output, err := client.Query(ctx, &dynamodb.QueryInput{
+            TableName:              aws.String("orders"),
+            KeyConditionExpression: aws.String("user_id = :uid"),
+            ExpressionAttributeValues: map[string]types.AttributeValue{
+                ":uid": &types.AttributeValueMemberS{Value: userID},
+            },
+        })
+    references:
+      - https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-query-scan.html
+
+  # ── Error handling ─────────────────────────────────────────────
+
+  - id: go-aws-s3-body-not-closed
+    name: S3 GetObject body not closed
+    description: >
+      Flags S3 GetObject responses where the Body is not closed with
+      defer. Leaks HTTP connections from the SDK's connection pool.
+    descriptions:
+      business: >
+        This code downloads a file from S3 but does not properly release
+        the connection afterward. Think of it like borrowing a library
+        book and never returning it — eventually the library runs out of
+        books to lend. After enough leaked connections, your service
+        silently hangs waiting for a free connection, causing a full
+        outage that is extremely difficult to diagnose because there are
+        no error messages.
+      developer: >
+        GetObject returns a streaming Body that holds an open HTTP
+        connection from the SDK pool. What happens without defer
+        resp.Body.Close() is the connection is never returned to the
+        pool. After the pool is exhausted, all subsequent AWS calls block
+        indefinitely. The correct pattern is always calling defer
+        resp.Body.Close() immediately after checking the error from
+        GetObject.
+    rationale: >
+      S3 GetObject returns a streaming Body that holds an open HTTP
+      connection. If you don't close it, the connection leaks from the
+      SDK's pool. After enough leaked connections, the SDK blocks waiting
+      for a free connection and your service appears to hang. Always
+      defer resp.Body.Close() immediately after checking the error.
+    severity: error
+    tags: [aws, s3, resource-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $RESP, $ERR := $CLIENT.GetObject($CTX, ...)
+          - pattern-not-inside: |
+              $RESP, $ERR := $CLIENT.GetObject($CTX, ...)
+              ...
+              defer $RESP.Body.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer resp.Body.Close() after checking the error from GetObject.
+      example: |
+        // Before — connection leak
+        resp, err := s3Client.GetObject(ctx, input)
+        if err != nil { return err }
+        data, _ := io.ReadAll(resp.Body)
+
+        // After
+        resp, err := s3Client.GetObject(ctx, input)
+        if err != nil { return err }
+        defer resp.Body.Close()
+        data, _ := io.ReadAll(resp.Body)
+    references:
+      - https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/s3#GetObjectOutput
+
+  - id: go-aws-sns-publish-error-unchecked
+    name: SNS Publish error not checked
+    description: >
+      Flags SNS Publish calls where the error return is not captured.
+      Silent notification loss.
+    descriptions:
+      business: >
+        This code sends a notification through AWS but ignores whether it
+        actually succeeded. Think of it like dropping a letter into a
+        mailbox without checking if the mailbox is actually connected to
+        the postal system. Without this fix, critical alerts, order
+        confirmations, and event notifications can silently vanish — and
+        you will not know until a customer complains or downstream
+        systems drift out of sync.
+      developer: >
+        SNS Publish was called without capturing the error return. What
+        happens is authorization errors, invalid topic ARNs, message
+        size limit violations, and throttling are all silently discarded.
+        The correct pattern is always capturing both return values and
+        handling the error — especially in event-driven architectures
+        where a missed publish means downstream services never receive
+        the event.
+    rationale: >
+      SNS Publish can fail due to authorization errors, invalid topic
+      ARNs, message size limits, or throttling. If you discard the error,
+      notifications are silently lost. In alerting pipelines, this means
+      pages never fire. In event-driven architectures, downstream services
+      never receive the event and data drifts silently.
+    severity: error
+    tags: [aws, sns, error-handling, message-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $CLIENT.Publish($CTX, ...)
+          - pattern-not: "$RESP, $ERR := $CLIENT.Publish($CTX, ...)"
+          - pattern-not: "$RESP, $ERR = $CLIENT.Publish($CTX, ...)"
+          - pattern-not: "$_, $ERR := $CLIENT.Publish($CTX, ...)"
+          - pattern-not: "$_, $ERR = $CLIENT.Publish($CTX, ...)"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Capture and handle the error return from SNS Publish.
+      example: |
+        // Before — silent notification loss
+        snsClient.Publish(ctx, &sns.PublishInput{
+            TopicArn: topicARN,
+            Message:  aws.String("order.created"),
+        })
+
+        // After
+        _, err := snsClient.Publish(ctx, &sns.PublishInput{
+            TopicArn: topicARN,
+            Message:  aws.String("order.created"),
+        })
+        if err != nil {
+            return fmt.Errorf("sns publish: %w", err)
+        }
+    references:
+      - https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/sns#Client.Publish

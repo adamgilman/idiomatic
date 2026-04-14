@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fake semgrep binary for E2E tests.
+# Uses printf instead of cat to avoid PATH issues in test environments.
+printf '%s\n' '{"results":[{"check_id":"idio.go-no-panic","path":"main.go","start":{"line":5,"col":2},"end":{"line":5,"col":15},"extra":{"message":"panic detected","severity":"ERROR"}}]}'
+exit 1

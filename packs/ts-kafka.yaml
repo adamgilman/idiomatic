@@ -1,0 +1,750 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ts-kafka
+  name: TypeScript Kafka
+  version: 0.1.0
+  description: >
+    Principal-level Apache Kafka rules for TypeScript services. Catches
+    offset commit ordering bugs, missing error handling, producer
+    reliability gaps, and consumer anti-patterns in KafkaJS applications
+    that cause message loss or duplicate processing.
+  descriptions:
+    business: >
+      Your team invested in Kafka so you can reliably move data between
+      services without losing messages. This pack catches mistakes that
+      cause silent message loss, duplicate processing, and consumer outages
+      — the kinds of bugs that show up as missing orders, double charges,
+      or services that stop processing without anyone noticing.
+    developer: >
+      KafkaJS gives you a clean async API for Kafka, but the defaults
+      around error handling, offset commits, and resource lifecycle can
+      bite you hard in production. These rules enforce patterns around
+      producer error handling, consumer crash recovery, graceful shutdown,
+      and connection cleanup that prevent the most common failure modes
+      in Node.js Kafka applications.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-kafka.yaml
+  tags:
+    language: typescript
+    vendor: kafka
+    category: messaging
+    architecture: [services, workers]
+
+rules:
+  # ── Resource lifecycle ─────────────────────────────────────────
+
+  - id: ts-kafka-no-disconnect
+    name: Kafka producer/consumer created without disconnect
+    description: >
+      Flags KafkaJS producer or consumer creation via kafka.producer()
+      or kafka.consumer() without a corresponding disconnect() call.
+      Leaks TCP connections and file descriptors.
+    descriptions:
+      business: >
+        This code opens a connection to Kafka but never closes it. Think
+        of it like leaving phone lines open after every call — eventually
+        you run out of lines and nobody can connect. Over time, this
+        exhausts connection limits on your Kafka cluster, causing outages
+        that affect every service that depends on Kafka.
+      developer: >
+        A KafkaJS producer or consumer was created without a corresponding
+        disconnect() call. Each instance maintains persistent TCP
+        connections to every broker. Without disconnect(), these leak on
+        restarts, hot-reloads, and test teardowns. Always pair creation
+        with disconnect() in a finally block or shutdown handler.
+    rationale: >
+      KafkaJS producers and consumers maintain persistent TCP connections
+      to every broker in the cluster. Without disconnect(), these connections
+      leak on every restart, hot-reload, or test teardown. In a long-running
+      service, leaked connections exhaust the broker's max.connections limit
+      and the OS file descriptor ceiling. In serverless or test environments,
+      the process hangs because the event loop is held open by the socket.
+      Always pair creation with disconnect() in a finally block or shutdown
+      handler.
+    severity: error
+    tags: [kafka, resource-leak, graceful-shutdown]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern-either:
+              - pattern: $KAFKA.producer(...)
+              - pattern: $KAFKA.consumer(...)
+          - pattern-not-inside: |
+              ...
+              $OBJ.disconnect()
+              ...
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Add a disconnect() call in a finally block or shutdown handler.
+      example: |
+        // Before — connection leak
+        const producer = kafka.producer();
+        await producer.connect();
+        await producer.send({ topic: 'orders', messages });
+
+        // After — clean shutdown
+        const producer = kafka.producer();
+        await producer.connect();
+        try {
+          await producer.send({ topic: 'orders', messages });
+        } finally {
+          await producer.disconnect();
+        }
+    references:
+      - https://kafka.js.org/docs/producer-example
+      - https://kafka.js.org/docs/consumer-example
+
+  # ── Producer reliability ───────────────────────────────────────
+
+  - id: ts-kafka-producer-no-error-handling
+    name: producer.send() without error handling
+    description: >
+      Flags KafkaJS producer.send() calls that are not wrapped in a
+      try/catch block and do not have a .catch() handler. Silent message
+      loss.
+    descriptions:
+      business: >
+        This code sends a message to Kafka but ignores delivery failures.
+        Think of it like mailing an important letter without a return
+        address — if it bounces, you'll never know. In a payment or order
+        pipeline, this means dropped transactions with no record in your
+        logs, leading to missing revenue and customer complaints.
+      developer: >
+        producer.send() was called without try/catch or .catch(). The
+        returned Promise rejects on network errors, leader elections, and
+        authorization failures. Without error handling, the rejection
+        becomes unhandled — Node.js logs a warning (or crashes) and the
+        message is silently lost. Always wrap send() in error handling
+        that logs, retries, or routes to a dead-letter topic.
+    rationale: >
+      producer.send() returns a Promise that rejects on network errors,
+      broker leader elections, topic authorization failures, and message
+      size violations. Without a try/catch or .catch(), the rejection
+      becomes an unhandled promise rejection — Node.js logs a warning
+      (or crashes in newer versions) and the message is silently lost.
+      In a payment or order pipeline, this means dropped transactions
+      with no trace in your application logs. Always wrap send() in
+      error handling that logs, retries, or routes to a dead-letter topic.
+    severity: error
+    tags: [kafka, producer, error-handling, message-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: $PRODUCER.send(...)
+          - pattern-not-inside: |
+              try { ... } catch ($E) { ... }
+          - pattern-not-inside: |
+              $PRODUCER.send(...).catch(...)
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Wrap producer.send() in try/catch or chain .catch().
+      example: |
+        // Before — silent message loss
+        await producer.send({
+          topic: 'orders',
+          messages: [{ value: JSON.stringify(order) }],
+        });
+
+        // After — error is handled
+        try {
+          await producer.send({
+            topic: 'orders',
+            messages: [{ value: JSON.stringify(order) }],
+          });
+        } catch (err) {
+          logger.error('Kafka produce failed', { err, topic: 'orders' });
+          await dlqProducer.send({
+            topic: 'orders.dlq',
+            messages: [{ value: JSON.stringify(order) }],
+          });
+        }
+    references:
+      - https://kafka.js.org/docs/producing
+      - https://kafka.js.org/docs/retry-detailed
+
+  # ── Consumer error handling ────────────────────────────────────
+
+  - id: ts-kafka-consumer-no-error-handler
+    name: Consumer without crash event handler
+    description: >
+      Flags KafkaJS consumer creation without registering a crash event
+      handler via consumer.on('consumer.crash', ...). Unhandled crashes
+      kill the process silently.
+    descriptions:
+      business: >
+        This consumer can die silently without anyone knowing. Think of it
+        like a warehouse worker who collapses but nobody notices because
+        there's no alarm — packages pile up unprocessed while the system
+        reports everything is fine. Messages queue up in Kafka with no one
+        consuming them, causing data processing delays that grow until
+        someone manually investigates.
+      developer: >
+        A KafkaJS consumer was created without a 'consumer.crash' event
+        handler. When the consumer loop hits a fatal error (rebalance
+        timeout, heartbeat failure), it dies silently — the process stays
+        alive but stops consuming. Register the crash handler to log,
+        alert, and either restart the consumer or exit the process so
+        the orchestrator can restart it.
+    rationale: >
+      KafkaJS emits a 'consumer.crash' event when the consumer loop
+      encounters a fatal error (e.g., rebalance timeout, heartbeat
+      failure, unrecoverable broker error). Without a handler, the
+      consumer dies silently — it stops consuming but the process stays
+      alive, giving the appearance of a healthy service while messages
+      pile up unconsumed. This is especially dangerous behind a load
+      balancer health check that only verifies the HTTP port. Register
+      the crash handler to log, alert, and optionally restart the
+      consumer or exit the process so the orchestrator can restart it.
+    severity: warning
+    tags: [kafka, consumer, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: $KAFKA.consumer(...)
+          - pattern-not-inside: |
+              ...
+              $CONSUMER.on("consumer.crash", ...)
+              ...
+          - pattern-not-inside: |
+              ...
+              $CONSUMER.on('consumer.crash', ...)
+              ...
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Register a consumer.crash event handler.
+      example: |
+        // Before — crash kills consumer silently
+        const consumer = kafka.consumer({ groupId: 'order-service' });
+        await consumer.connect();
+        await consumer.subscribe({ topic: 'orders' });
+
+        // After — crash is detected and handled
+        const consumer = kafka.consumer({ groupId: 'order-service' });
+        consumer.on('consumer.crash', async (event) => {
+          logger.error('Consumer crashed', { error: event.payload.error });
+          metrics.consumerCrashes.inc();
+          // Optionally restart or exit
+          process.exit(1);
+        });
+        await consumer.connect();
+        await consumer.subscribe({ topic: 'orders' });
+    references:
+      - https://kafka.js.org/docs/instrumentation-events
+      - https://kafka.js.org/docs/consumer-example
+
+  # ── Configuration ──────────────────────────────────────────────
+
+  - id: ts-kafka-hardcoded-broker
+    name: Hardcoded Kafka broker addresses
+    description: >
+      Flags Kafka client instantiation with broker addresses as string
+      literals in the brokers array. Broker addresses should come from
+      environment variables or configuration.
+    descriptions:
+      business: >
+        This code has server addresses baked directly into the application.
+        Think of it like printing your office address on every business
+        card in permanent ink — if you move, every card is wrong. You
+        can't promote the same build from staging to production, and
+        disaster recovery (switching to a backup cluster) requires a code
+        change and redeployment instead of a config update.
+      developer: >
+        Broker addresses are hardcoded as string literals in the Kafka
+        constructor. This couples your build artifact to a specific
+        cluster, violating twelve-factor principles. Use environment
+        variables or a configuration service so broker addresses are
+        injected at runtime and the same container image works across
+        all environments.
+    rationale: >
+      Hardcoded broker addresses couple your build artifact to a specific
+      Kafka cluster. You cannot promote the same container image from
+      staging to production without a code change and rebuild. This
+      violates twelve-factor app principles and makes disaster recovery
+      (cluster migration, failover to a secondary region) require a code
+      deploy instead of a config change. Use environment variables or a
+      configuration service so broker addresses are injected at runtime.
+    severity: warning
+    tags: [kafka, configuration, twelve-factor]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: |
+          new Kafka({..., brokers: ["..."], ...})
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts", "**/__tests__/**"]
+    fix:
+      message: Load broker addresses from environment variables or configuration.
+      example: |
+        // Before — coupled to a specific cluster
+        const kafka = new Kafka({
+          clientId: 'order-service',
+          brokers: ['kafka-1.prod.internal:9092', 'kafka-2.prod.internal:9092'],
+        });
+
+        // After — twelve-factor compliant
+        const kafka = new Kafka({
+          clientId: 'order-service',
+          brokers: (process.env.KAFKA_BROKERS ?? '').split(','),
+        });
+    references:
+      - https://kafka.js.org/docs/configuration
+      - https://12factor.net/config
+
+  # ── Security ───────────────────────────────────────────────────
+
+  - id: ts-kafka-sasl-password-literal
+    name: SASL password as string literal
+    description: >
+      Flags KafkaJS SASL configuration with the password field set to
+      a string literal. Credentials should come from environment
+      variables or a secret store.
+    descriptions:
+      business: >
+        This code has a Kafka password written directly in the source code.
+        Anyone with repository access — current employees, past employees,
+        contractors — can read it. A single leaked credential gives an
+        attacker full access to read and write every message on your Kafka
+        cluster, potentially exposing customer data and enabling data
+        manipulation.
+      developer: >
+        A SASL password is hardcoded as a string literal in the Kafka
+        config. This ends up in git history, CI logs, and Docker image
+        layers permanently. Use environment variables or a secret store
+        (Vault, AWS Secrets Manager) so credentials are never committed
+        to source control.
+    rationale: >
+      Hardcoded SASL credentials in source code end up in version control
+      history, CI logs, Docker image layers, and source map files. Anyone
+      with repository access can read the production Kafka cluster
+      credentials. A single leaked credential gives an attacker full
+      produce/consume access to every topic the SASL user is authorized
+      for. Use environment variables, a secret store (Vault, AWS Secrets
+      Manager, GCP Secret Manager), or a credential provider callback.
+    severity: error
+    tags: [kafka, security, secrets]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: |
+              new Kafka({..., sasl: {..., password: "...", ...}, ...})
+          - pattern: |
+              new Kafka({..., sasl: {..., password: '...', ...}, ...})
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts", "**/__tests__/**"]
+    fix:
+      message: Load SASL credentials from environment variables or a secret store.
+      example: |
+        // Before — credentials in source code
+        const kafka = new Kafka({
+          brokers,
+          sasl: {
+            mechanism: 'plain',
+            username: 'order-service',
+            password: 'super-secret-password',
+          },
+        });
+
+        // After — credentials from environment
+        const kafka = new Kafka({
+          brokers,
+          sasl: {
+            mechanism: 'plain',
+            username: process.env.KAFKA_SASL_USERNAME!,
+            password: process.env.KAFKA_SASL_PASSWORD!,
+          },
+        });
+    references:
+      - https://kafka.js.org/docs/configuration#sasl
+      - https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html
+
+  # ── Consumer graceful shutdown ─────────────────────────────────
+
+  - id: ts-kafka-consumer-no-graceful-shutdown
+    name: Consumer without SIGTERM/SIGINT shutdown handler
+    description: >
+      Flags KafkaJS consumer.run() calls without a corresponding
+      process signal handler for SIGTERM or SIGINT that calls
+      consumer.disconnect().
+    descriptions:
+      business: >
+        This service doesn't shut down cleanly when Kubernetes restarts it.
+        Think of it like a shift worker who leaves without clocking out —
+        the system thinks they're still working, so nobody takes over their
+        tasks. During deployments, this causes 10+ second gaps where
+        messages pile up unprocessed, directly impacting data freshness
+        and processing SLAs.
+      developer: >
+        consumer.run() was called without a SIGTERM/SIGINT handler that
+        calls consumer.disconnect(). Without it, the consumer never sends
+        a LeaveGroup request on pod termination. The broker waits for
+        session.timeout.ms before triggering a rebalance, creating an
+        orphaned-partition window. Always trap SIGTERM and call
+        disconnect() for a clean consumer group leave.
+    rationale: >
+      On Kubernetes pod termination, the kubelet sends SIGTERM and waits
+      terminationGracePeriodSeconds (default 30s) before SIGKILL. Without
+      a signal handler that calls consumer.disconnect(), the consumer
+      never sends a LeaveGroup request to the Kafka coordinator. The
+      broker waits for session.timeout.ms (default 10s) before removing
+      the member and triggering a rebalance. During that window, the
+      partitions assigned to the dead consumer are orphaned — no consumer
+      in the group processes them. In a rolling deploy with multiple pods,
+      this creates repeated rebalance storms and processing gaps. Always
+      trap SIGTERM/SIGINT and call disconnect() for a clean leave.
+    severity: warning
+    tags: [kafka, consumer, graceful-shutdown]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: $CONSUMER.run(...)
+          - pattern-not-inside: |
+              ...
+              process.on("SIGTERM", ...)
+              ...
+          - pattern-not-inside: |
+              ...
+              process.on('SIGTERM', ...)
+              ...
+          - pattern-not-inside: |
+              ...
+              process.once("SIGTERM", ...)
+              ...
+          - pattern-not-inside: |
+              ...
+              process.once('SIGTERM', ...)
+              ...
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Add SIGTERM/SIGINT handlers that call consumer.disconnect().
+      example: |
+        // Before — consumer hangs on pod termination
+        await consumer.run({
+          eachMessage: async ({ message }) => {
+            await processMessage(message);
+          },
+        });
+
+        // After — clean shutdown
+        const shutdown = async () => {
+          logger.info('Shutting down consumer...');
+          await consumer.disconnect();
+          process.exit(0);
+        };
+        process.on('SIGTERM', shutdown);
+        process.on('SIGINT', shutdown);
+
+        await consumer.run({
+          eachMessage: async ({ message }) => {
+            await processMessage(message);
+          },
+        });
+    references:
+      - https://kafka.js.org/docs/consumer-example
+      - https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination
+
+  # ── Consumer message handling ──────────────────────────────────
+
+  - id: ts-kafka-each-message-no-error-handling
+    name: eachMessage handler without try/catch
+    description: >
+      Flags KafkaJS consumer.run() with an eachMessage handler that
+      does not wrap its body in a try/catch block.
+    descriptions:
+      business: >
+        This code lets a single bad message crash the entire consumer. Think
+        of it like an assembly line that shuts down every time one defective
+        part comes through. A malformed message creates an infinite crash
+        loop — the consumer restarts, hits the same bad message, crashes
+        again — blocking all message processing until someone manually
+        intervenes.
+      developer: >
+        The eachMessage handler doesn't have a try/catch. When it throws,
+        KafkaJS treats it as fatal and crashes the consumer loop. For poison
+        messages (malformed JSON, unexpected schema), this creates an
+        infinite crash-restart loop. Wrap eachMessage in try/catch to
+        handle errors per-message: log, route to a DLQ, or skip.
+    rationale: >
+      When eachMessage throws an unhandled exception, KafkaJS treats it
+      as a fatal error — it crashes the consumer loop and emits a
+      consumer.crash event. If you also lack a crash handler (see
+      ts-kafka-consumer-no-error-handler), the consumer dies silently.
+      Even with a crash handler, each unhandled throw restarts the
+      consumer from the last committed offset, reprocessing all messages
+      since the last commit. For poison messages (malformed JSON,
+      unexpected schema), this creates an infinite crash loop. Wrap
+      eachMessage in try/catch to handle errors per-message: log, route
+      to a DLQ, or skip.
+    severity: warning
+    tags: [kafka, consumer, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: |
+          $CONSUMER.run({..., eachMessage: async ({...}) => {
+            ...
+          }, ...})
+        pattern-not: |
+          $CONSUMER.run({..., eachMessage: async ({...}) => {
+            try { ... } catch ($E) { ... }
+          }, ...})
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Wrap eachMessage body in try/catch to handle errors per-message.
+      example: |
+        // Before — one bad message crashes the consumer loop
+        await consumer.run({
+          eachMessage: async ({ topic, partition, message }) => {
+            const order = JSON.parse(message.value!.toString());
+            await processOrder(order);
+          },
+        });
+
+        // After — errors handled per-message
+        await consumer.run({
+          eachMessage: async ({ topic, partition, message }) => {
+            try {
+              const order = JSON.parse(message.value!.toString());
+              await processOrder(order);
+            } catch (err) {
+              logger.error('Message processing failed', {
+                topic, partition, offset: message.offset, err,
+              });
+              await dlqProducer.send({
+                topic: `${topic}.dlq`,
+                messages: [{ value: message.value, headers: message.headers }],
+              });
+            }
+          },
+        });
+    references:
+      - https://kafka.js.org/docs/consuming#a-]name-each-message
+      - https://www.confluent.io/blog/error-handling-patterns-in-kafka/
+
+  # ── Offset management ─────────────────────────────────────────
+
+  - id: ts-kafka-commit-offsets-manual-no-check
+    name: commitOffsets() without error handling
+    description: >
+      Flags KafkaJS consumer.commitOffsets() calls that are not wrapped
+      in a try/catch block.
+    descriptions:
+      business: >
+        This code saves a bookmark in the message stream but doesn't check
+        if the save succeeded. Think of it like a cashier marking a receipt
+        as processed but the register doesn't actually record it. On
+        restart, the system reprocesses messages from the last good
+        bookmark — leading to duplicate charges, duplicate emails, or
+        double-counted analytics.
+      developer: >
+        commitOffsets() was called without try/catch. This call can fail
+        due to REBALANCE_IN_PROGRESS, NOT_COORDINATOR, or network errors.
+        A failed commit means the consumer thinks it committed but the
+        broker didn't record it — causing duplicate processing on restart.
+        Always wrap commitOffsets() in try/catch and take corrective
+        action on failure.
+    rationale: >
+      consumer.commitOffsets() sends an OffsetCommit request to the group
+      coordinator. This can fail due to rebalance-in-progress
+      (REBALANCE_IN_PROGRESS), coordinator migration
+      (NOT_COORDINATOR), or network errors. Without error handling,
+      a failed commit means the consumer believes it committed but
+      the broker did not record the offset. On consumer restart, messages
+      are reprocessed from the last successfully committed offset,
+      causing duplicate processing. In manual-commit workflows (autoCommit
+      disabled), every commitOffsets() call must be wrapped in try/catch
+      to detect failures and take corrective action — retry, pause
+      consumption, or alert.
+    severity: warning
+    tags: [kafka, offset-management, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: $CONSUMER.commitOffsets(...)
+          - pattern-not-inside: |
+              try { ... } catch ($E) { ... }
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Wrap commitOffsets() in try/catch to handle commit failures.
+      example: |
+        // Before — silent commit failure, duplicate processing on restart
+        await consumer.commitOffsets([
+          { topic: 'orders', partition: 0, offset: (Number(message.offset) + 1).toString() },
+        ]);
+
+        // After — commit failure is detected
+        try {
+          await consumer.commitOffsets([
+            { topic: 'orders', partition: 0, offset: (Number(message.offset) + 1).toString() },
+          ]);
+        } catch (err) {
+          logger.error('Offset commit failed', {
+            topic: 'orders', partition: 0, offset: message.offset, err,
+          });
+          // Pause and retry, or let the consumer rebalance
+          consumer.pause([{ topic: 'orders' }]);
+        }
+    references:
+      - https://kafka.js.org/docs/consuming#a-name-manual-committing-a-manual-committing
+      - https://kafka.apache.org/protocol#The_Messages_OffsetCommit
+
+  # ── Consumer configuration ────────────────────────────────────
+
+  - id: ts-kafka-consumer-no-retry
+    name: Consumer configuration without retry settings
+    description: >
+      Flags KafkaJS consumer creation without explicit retry
+      configuration. KafkaJS defaults may not suit your workload.
+    descriptions:
+      business: >
+        This consumer uses default retry settings that may not match your
+        service's needs. Think of it like an auto-redial feature with no
+        limit — if the line is down, it keeps trying forever while the
+        work piles up. For time-sensitive events like payment processing
+        or real-time notifications, wrong retry settings mean either
+        giving up too soon or waiting too long.
+      developer: >
+        A KafkaJS consumer was created without explicit retry configuration.
+        The defaults (5 retries, exponential backoff up to 30s) may not
+        suit your workload. Explicitly set retries and maxRetryTime to
+        values appropriate for your SLO — this forces a deliberate team
+        decision about retry budget instead of hoping the defaults work.
+    rationale: >
+      KafkaJS defaults to infinite retries with exponential backoff
+      (initialRetryTime: 300ms, maxRetryTime: 30s, multiplier: 2,
+      retries: 5 for the consumer). While these defaults are reasonable
+      for many workloads, they are often wrong for latency-sensitive
+      consumers or consumers processing time-critical events. A consumer
+      with unlimited retries on a network partition will retry forever,
+      appearing healthy while messages age out of retention. Explicitly
+      setting retry configuration forces a team decision about retry
+      budget: how many retries, what backoff, and what to do when retries
+      are exhausted. At minimum, set retries and maxRetryTime to values
+      appropriate for your SLO.
+    severity: info
+    tags: [kafka, consumer, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: $KAFKA.consumer({...})
+          - pattern-not: "$KAFKA.consumer({..., retry: $RETRY, ...})"
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Add explicit retry configuration to the consumer.
+      example: |
+        // Before — using KafkaJS defaults blindly
+        const consumer = kafka.consumer({
+          groupId: 'order-service',
+        });
+
+        // After — explicit retry policy
+        const consumer = kafka.consumer({
+          groupId: 'order-service',
+          retry: {
+            retries: 8,
+            initialRetryTime: 300,
+            maxRetryTime: 30000,
+            multiplier: 2,
+          },
+        });
+    references:
+      - https://kafka.js.org/docs/retry-detailed
+      - https://kafka.js.org/docs/configuration#default-retry
+
+  # ── Security (TLS) ────────────────────────────────────────────
+
+  - id: ts-kafka-ssl-reject-unauthorized-false
+    name: SSL with rejectUnauthorized disabled
+    description: >
+      Flags KafkaJS SSL configuration with rejectUnauthorized set to
+      false. Disables TLS certificate verification, enabling
+      man-in-the-middle attacks.
+    descriptions:
+      business: >
+        This code disables the security check that verifies your Kafka
+        connection is going to the real server. Think of it like accepting
+        any ID card without checking the photo — an impersonator can
+        intercept all your message traffic. An attacker on the network
+        can read every message (including customer data) and inject
+        fake messages into your system.
+      developer: >
+        rejectUnauthorized is set to false in the KafkaJS SSL config. This
+        tells the TLS client to accept any certificate, including
+        attacker-controlled ones, completely defeating TLS. This is
+        typically a dev "quick fix" for self-signed certs that ships to
+        production. Configure the CA certificate via ssl.ca instead so
+        the client properly verifies the broker's identity.
+    rationale: >
+      Setting rejectUnauthorized: false tells the TLS client to accept
+      any certificate presented by the broker, including self-signed,
+      expired, or attacker-controlled certificates. This completely
+      defeats TLS — an attacker on the network path can intercept all
+      Kafka traffic, read message contents, and inject messages. This
+      is commonly added as a "quick fix" during development when a
+      self-signed CA is used, then accidentally shipped to production.
+      Instead, configure the CA certificate via the ssl.ca option so
+      the client can verify the broker's certificate. In CI/test
+      environments, use a proper test CA rather than disabling
+      verification.
+    severity: error
+    tags: [kafka, security, tls]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: |
+              new Kafka({..., ssl: {..., rejectUnauthorized: false, ...}, ...})
+          - pattern: |
+              new Kafka({..., ssl: { rejectUnauthorized: false }, ...})
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**"]
+    fix:
+      message: Remove rejectUnauthorized or set it to true. Configure the CA certificate instead.
+      example: |
+        // Before — TLS verification disabled, MITM vulnerable
+        const kafka = new Kafka({
+          brokers,
+          ssl: {
+            rejectUnauthorized: false,
+          },
+        });
+
+        // After — proper CA verification
+        import { readFileSync } from 'fs';
+        const kafka = new Kafka({
+          brokers,
+          ssl: {
+            ca: [readFileSync(process.env.KAFKA_CA_PATH!, 'utf-8')],
+            rejectUnauthorized: true,
+          },
+        });
+    references:
+      - https://kafka.js.org/docs/configuration#ssl
+      - https://nodejs.org/api/tls.html#tlscreatesecurecontextoptions

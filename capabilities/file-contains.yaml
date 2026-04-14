@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: file-contains
+  version: 1.0.0
+  description: Per-rule check that a file contains a regex. Wraps grep -E -q; rule supplies path, pattern, and fire_when.
+
+spec:
+  applies_to_files:
+
+  requires:
+    binary: grep
+    install: "your system package manager"
+
+  inputs:
+    path:
+      type: string
+      required: true
+      description: Path relative to the project root
+    pattern:
+      type: string
+      required: true
+      description: Regex pattern to search for in the file
+    fire_when:
+      type: string
+      required: true
+      description: |
+        Expression evaluated against the scalar signal. Use
+        'signal.exit_code != 0' to fire when the pattern is missing or
+        the file does not exist.
+
+  run:
+    per: rule
+    argv:
+      - -q
+      - -E
+      - "{{ .Inputs.pattern }}"
+      - "{project}/{{ .Inputs.path }}"
+    timeout: 5s
+    ok_exit: [0, 1, 2]   # 1 = no match, 2 = file missing
+    output: stdout
+
+  signal:
+    shape: scalar
+    scalar_fields:
+      stdout:    { from: stdout, transform: trim }
+      stderr:    { from: stderr, transform: trim }
+      exit_code: { from: exit }
+    fixed_file: "{project}/{{ .Inputs.path }}"

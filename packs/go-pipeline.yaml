@@ -1,0 +1,688 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-pipeline
+  name: Go Pipeline
+  version: 0.1.0
+  description: >
+    Principal-level rules for Go data pipelines. Catches missing
+    idempotency, unbounded buffering, checkpoint gaps, and error
+    handling anti-patterns that cause data loss or duplicate
+    processing at scale.
+  descriptions:
+    business: >
+      These rules protect your data processing pipelines from losing
+      or corrupting data at scale. Problems here are especially
+      dangerous because they work fine in development with small
+      datasets but fail catastrophically in production with real
+      volumes -- crashing with out-of-memory errors, silently dropping
+      records, or corrupting data that downstream systems depend on.
+    developer: >
+      This pack targets Go data pipeline anti-patterns: unbounded
+      slice growth that OOMs at scale, goroutine-per-item concurrency
+      that exhausts resources, log-and-continue error handling that
+      hides data loss, missing batching that hits protocol limits,
+      input mutation that breaks stage isolation, missing context
+      propagation, and fan-in patterns that leak goroutines. Each
+      rule catches a "works in dev, breaks in prod" pattern.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-pipeline.yaml
+  tags:
+    language: go
+    category: architecture
+    architecture: [pipelines]
+
+rules:
+  # ── Unbounded growth ────────────────────────────────────────
+
+  - id: go-pipe-unbounded-buffer
+    name: Unbounded append inside loop without size limit
+    description: >
+      Flags append() calls inside for loops that accumulate into a
+      slice without checking the slice length or applying a size
+      cap. For large datasets the slice grows until OOM.
+    descriptions:
+      business: >
+        This code accumulates all results in memory with no limit,
+        which works fine with small test data but crashes your service
+        when processing real production volumes. Think of it like trying
+        to pour an entire swimming pool into a single bucket -- it works
+        for the first cup. Without this fix, your pipeline will crash
+        without warning once data volume crosses a threshold, losing all
+        progress.
+      developer: >
+        append() is called inside a for loop accumulating into a slice
+        with no size check. What happens is the slice grows until the
+        Go runtime cannot allocate the next backing array and the process
+        is OOM-killed -- no error, no panic, the process just disappears.
+        The correct pattern is to process in fixed-size chunks: accumulate
+        up to N items, flush the batch, and reset the slice.
+    rationale: >
+      append() in a loop is the most natural Go pattern, but in a
+      data pipeline it is a time bomb. When processing 10 records
+      in dev, it works fine. When processing 10 million records in
+      production, the slice grows until the Go runtime cannot
+      allocate the next backing array and the process is OOM-killed.
+      The insidious part is that this fails silently — there's no
+      error, the process just disappears. The fix is to process in
+      chunks: accumulate up to N items, flush the batch, and reset
+      the slice. This gives you predictable memory usage regardless
+      of input size and enables checkpoint/resume semantics.
+    severity: warning
+    tags: [pipelines, memory, unbounded-growth]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $SLICE = append($SLICE, ...)
+          - pattern-inside: |
+              for ... {
+                ...
+              }
+          - pattern-not-inside: |
+              if len($SLICE) >= $LIMIT {
+                ...
+              }
+          - pattern-not-inside: |
+              if len($SLICE) > $LIMIT {
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add a size check and flush mechanism to prevent unbounded slice growth.
+      example: |
+        // Before — OOM on large datasets
+        var results []Result
+        for _, item := range items {
+            result := transform(item)
+            results = append(results, result)
+        }
+        flush(results)
+
+        // After — bounded memory, chunked processing
+        const batchSize = 1000
+        batch := make([]Result, 0, batchSize)
+        for _, item := range items {
+            result := transform(item)
+            batch = append(batch, result)
+            if len(batch) >= batchSize {
+                flush(batch)
+                batch = batch[:0]
+            }
+        }
+        if len(batch) > 0 {
+            flush(batch)
+        }
+    references:
+      - https://go.dev/blog/slices-intro
+      - https://pkg.go.dev/runtime#MemStats
+
+  # ── Concurrency ─────────────────────────────────────────────
+
+  - id: go-pipe-goroutine-per-item
+    name: Goroutine launched per item without worker pool
+    description: >
+      Flags go func() calls inside a for/range loop without a
+      semaphore, errgroup, or worker pool limiting concurrency.
+      Each item spawns an unbounded goroutine.
+    descriptions:
+      business: >
+        This code launches a separate thread for every single item it
+        processes, with no limit. Think of it like hiring a new employee
+        for every customer order instead of using a fixed team -- at
+        scale, you run out of desks, phones, and oxygen. Without this
+        fix, a large batch will exhaust your service's memory and
+        overwhelm every downstream system with simultaneous requests,
+        causing cascading failures.
+      developer: >
+        A go func() is launched per item inside a for/range loop without
+        a semaphore or errgroup limiting concurrency. What happens is a
+        million items spawn a million goroutines, each consuming stack
+        memory and hammering downstream services simultaneously. The
+        correct pattern is to use errgroup.SetLimit or a semaphore
+        channel to bound concurrency to what your infrastructure can
+        handle.
+    rationale: >
+      Launching a goroutine per item seems harmless because
+      goroutines are cheap — until you process a million items and
+      spawn a million goroutines. Each goroutine consumes at least
+      2KB of stack (growing to 1MB under load), and all of them
+      hammer downstream services simultaneously. The result is
+      memory exhaustion, connection pool starvation, and cascading
+      failures in downstream dependencies. Use a worker pool
+      (errgroup with SetLimit, or a semaphore channel) to bound
+      concurrency to a number your infrastructure can handle. This
+      also makes the system predictable: you can reason about
+      connection counts, memory usage, and downstream load.
+    severity: warning
+    tags: [pipelines, concurrency, resource-exhaustion]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              go func(...) { ... }(...)
+          - pattern-inside: |
+              for ... {
+                ...
+              }
+          - pattern-not-inside: |
+              $SEM <- $TICKET
+              ...
+              go func(...) { ... }(...)
+          - pattern-not-inside: |
+              $GROUP.Go(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use errgroup.SetLimit, a semaphore channel, or a fixed worker pool to bound concurrency.
+      example: |
+        // Before — unbounded goroutines
+        for _, item := range items {
+            go func(it Item) {
+                process(ctx, it)
+            }(item)
+        }
+
+        // After — bounded concurrency with errgroup
+        g, ctx := errgroup.WithContext(ctx)
+        g.SetLimit(10)
+        for _, item := range items {
+            item := item
+            g.Go(func() error {
+                return process(ctx, item)
+            })
+        }
+        if err := g.Wait(); err != nil {
+            return err
+        }
+    references:
+      - https://pkg.go.dev/golang.org/x/sync/errgroup
+      - https://go.dev/blog/pipelines
+
+  - id: go-pipe-error-swallowed
+    name: Pipeline error logged but processing continues
+    description: >
+      Flags error handling in pipeline stages that logs the error
+      and continues without tracking failure counts or stopping
+      the pipeline.
+    descriptions:
+      business: >
+        This pipeline silently drops records that fail processing, with
+        no count of how many were lost and no way to recover them. Think
+        of it like a factory quality inspector who throws defective
+        products in the trash without telling anyone -- your completion
+        report says 100% success while data is missing. Without this fix,
+        you could lose significant volumes of data before anyone notices.
+      developer: >
+        Error handling in a pipeline stage logs the error and continues
+        without incrementing a failure counter or routing to a dead-letter
+        path. What happens is the pipeline reports success while silently
+        dropping failed records. The correct pattern is to at minimum
+        track a failure counter for alerting, and ideally define a
+        failure threshold that stops the pipeline when the error rate is
+        too high.
+    rationale: >
+      In a data pipeline, "log and continue" creates a silent data
+      loss problem. The pipeline reports success — it processed all
+      records! — but 30% of them failed silently. You discover this
+      when a downstream consumer notices missing data, which could
+      be days later. The fix depends on your requirements: for
+      best-effort pipelines, count failures and alert when the
+      error rate exceeds a threshold. For exactly-once pipelines,
+      stop processing and surface the error. In either case, you
+      need a failure counter at minimum so your monitoring can
+      answer "how many records did we actually process successfully?"
+    severity: warning
+    tags: [pipelines, error-handling, data-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              if $ERR != nil {
+                ...
+                $LOG.$METHOD(...)
+                ...
+                continue
+              }
+          - pattern-inside: |
+              for ... {
+                ...
+              }
+          - pattern-not-inside: |
+              if $ERR != nil {
+                ...
+                $COUNTER.Inc(...)
+                ...
+              }
+          - pattern-not-inside: |
+              if $ERR != nil {
+                ...
+                $COUNTER.Add(...)
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Track failure counts with a metric and define an error threshold or dead-letter path.
+      example: |
+        // Before — silent data loss
+        for _, record := range records {
+            if err := transform(ctx, record); err != nil {
+                log.Error("transform failed", "err", err)
+                continue
+            }
+            emit(record)
+        }
+
+        // After — failures tracked and alertable
+        var failures int64
+        for _, record := range records {
+            if err := transform(ctx, record); err != nil {
+                log.Error("transform failed", "err", err,
+                    "record_id", record.ID)
+                failureCounter.Inc()
+                failures++
+                if failures > maxFailures {
+                    return fmt.Errorf("failure threshold exceeded: %d/%d",
+                        failures, len(records))
+                }
+                continue
+            }
+            emit(record)
+            successCounter.Inc()
+        }
+    references:
+      - https://sre.google/sre-book/monitoring-distributed-systems/
+      - https://go.dev/blog/pipelines
+
+  # ── Batching ────────────────────────────────────────────────
+
+  - id: go-pipe-no-batch-size
+    name: Processing all items in a single unbounded batch
+    description: >
+      Flags functions that operate on an entire slice at once
+      (e.g., passing a full slice to a database insert or API call)
+      without chunking it into smaller batches.
+    descriptions:
+      business: >
+        This code sends all data in a single massive operation instead
+        of breaking it into manageable pieces. Think of it like trying
+        to move an entire house of furniture in one truck trip instead
+        of making multiple runs -- it works until the load exceeds the
+        truck's capacity, then nothing moves. Without this fix, a single
+        failure means all data is lost and the entire operation must
+        restart from scratch.
+      developer: >
+        An entire slice is passed to a downstream call (bulk insert, API
+        batch) without chunking. What happens in production with large
+        datasets is you hit database query size limits, HTTP payload
+        limits, serialization buffer memory pressure, or timeout
+        thresholds. The correct pattern is to chunk into fixed-size
+        batches (typically 100-1000 for databases), which gives you
+        predictable resource usage and partial progress on failure.
+    rationale: >
+      Passing an entire slice to a downstream call works in
+      development with 50 records. In production with 500,000
+      records, you hit database query size limits, HTTP payload
+      limits, memory pressure from serialization buffers, and
+      timeout thresholds. A single failure means the entire batch
+      is lost and must be retried from scratch. Chunking into
+      fixed-size batches gives you predictable resource usage,
+      enables partial progress (if batch 47 of 500 fails, you
+      only retry batch 47), and avoids hitting protocol-level
+      limits. The batch size should be tuned to your downstream
+      system's optimal throughput — typically 100-1000 for
+      databases, 25-100 for HTTP APIs.
+    severity: warning
+    tags: [pipelines, batching, memory]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $DB.Exec($CTX, $QUERY, $ITEMS...)
+              - pattern: $DB.BulkInsert($CTX, $ITEMS)
+              - pattern: $CLIENT.SendBatch($CTX, $ITEMS)
+              - pattern: $CLIENT.BulkIndex($CTX, $ITEMS)
+          - pattern-not-inside: |
+              for $I := 0; $I < len($ITEMS); $I += $BATCH {
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Chunk the input into fixed-size batches before sending to the downstream system.
+      example: |
+        // Before — entire dataset in one call
+        func ingest(ctx context.Context, records []Record) error {
+            return db.BulkInsert(ctx, records)
+        }
+
+        // After — chunked with partial progress
+        func ingest(ctx context.Context, records []Record) error {
+            const batchSize = 500
+            for i := 0; i < len(records); i += batchSize {
+                end := i + batchSize
+                if end > len(records) {
+                    end = len(records)
+                }
+                if err := db.BulkInsert(ctx, records[i:end]); err != nil {
+                    return fmt.Errorf("batch %d-%d failed: %w", i, end, err)
+                }
+            }
+            return nil
+        }
+    references:
+      - https://go.dev/blog/slices-intro
+      - https://pkg.go.dev/database/sql#DB.ExecContext
+
+  # ── Pipeline isolation ──────────────────────────────────────
+
+  - id: go-pipe-mutate-input
+    name: Pipeline stage mutating input parameters in place
+    description: >
+      Flags functions that modify slice or struct pointer
+      parameters in place rather than returning new values.
+      This breaks pipeline stage isolation and causes data
+      corruption in concurrent pipelines.
+    descriptions:
+      business: >
+        This code modifies data that other parts of the system are also
+        reading, which can cause silent data corruption. Think of it
+        like two people editing the same spreadsheet simultaneously
+        without version control -- changes overwrite each other
+        unpredictably. Without this fix, you get intermittent data
+        corruption that is nearly impossible to reproduce and debug,
+        and you lose the ability to retry failed stages because the
+        original data has been altered.
+      developer: >
+        A pipeline stage function mutates its input slice or struct in
+        place instead of returning new values. What happens is the
+        caller and callee share the same backing array, so mutations
+        are visible to every other consumer of that data. The correct
+        pattern is to treat pipeline stages as pure functions: take
+        input, produce new output, never modify the input.
+    rationale: >
+      A well-designed pipeline stage is a pure function: it
+      takes input, produces output, and never modifies its input.
+      When a stage mutates its input slice or struct in place,
+      you lose the ability to retry (the original data is gone),
+      you cannot fan-out the same input to multiple stages
+      (they'd corrupt each other's data), and debugging becomes
+      nearly impossible because the data changes shape as it
+      flows through the pipeline. This is especially dangerous
+      with slice parameters: the caller and callee share the
+      same backing array, so mutations in the stage are visible
+      to every other consumer of that slice. Return new values
+      instead.
+    severity: warning
+    tags: [pipelines, immutability, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  func $FUNC($ITEMS []$TYPE) {
+                    ...
+                    $ITEMS[$IDX] = ...
+                    ...
+                  }
+              - pattern: |
+                  func $FUNC($ITEMS []$TYPE) {
+                    ...
+                    $ITEMS[$IDX].$FIELD = ...
+                    ...
+                  }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Return a new slice instead of modifying the input. Copy if you need to transform in place.
+      example: |
+        // Before — mutates caller's data
+        func enrich(records []Record) {
+            for i := range records {
+                records[i].Enriched = true
+                records[i].Timestamp = time.Now()
+            }
+        }
+
+        // After — returns new data, input untouched
+        func enrich(records []Record) []Record {
+            out := make([]Record, len(records))
+            for i, r := range records {
+                r.Enriched = true
+                r.Timestamp = time.Now()
+                out[i] = r
+            }
+            return out
+        }
+    references:
+      - https://go.dev/blog/slices-intro
+      - https://go.dev/doc/effective_go#slices
+
+  # ── Context propagation ────────────────────────────────────
+
+  - id: go-pipe-no-context-propagation
+    name: Pipeline stage function without context.Context parameter
+    description: >
+      Flags exported functions that process data (transform,
+      enrich, validate, filter patterns) without accepting a
+      context.Context as the first parameter.
+    descriptions:
+      business: >
+        This pipeline stage cannot be stopped once started, even during
+        deployments or when you need to shut down the system. Think of
+        it like a conveyor belt with no off switch -- the only way to
+        stop it is to cut the power. Without this fix, pipeline stages
+        continue processing indefinitely during shutdowns, potentially
+        corrupting data, and your observability tools cannot trace what
+        is happening inside the stage.
+      developer: >
+        An exported pipeline stage function does not accept
+        context.Context as its first parameter. What happens is the
+        stage cannot be cancelled, cannot enforce deadlines, and cannot
+        propagate trace spans -- making it invisible to your
+        observability stack. The correct pattern per Go convention is to
+        always accept context.Context as the first parameter so
+        cancellation and tracing propagate through the entire pipeline.
+    rationale: >
+      A pipeline stage without a context.Context parameter cannot
+      be cancelled, cannot enforce deadlines, and cannot propagate
+      trace spans. When the pipeline needs to shut down (deployment,
+      scaling event, timeout), stages without context will continue
+      processing indefinitely — blocking graceful shutdown and
+      potentially corrupting state. Context is also how you carry
+      trace IDs through the pipeline: without it, your observability
+      tools show a black hole where the stage should be. The Go
+      convention is unambiguous — context.Context is always the
+      first parameter. Pipeline stages are no exception.
+    severity: warning
+    tags: [pipelines, context, cancellation]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  func $FUNC($ITEMS []$TYPE) ([]$RTYPE, error) {
+                    ...
+                  }
+              - pattern: |
+                  func $FUNC($ITEMS []$TYPE) []$RTYPE {
+                    ...
+                  }
+              - pattern: |
+                  func ($RECV $RTYPE) $FUNC($ITEMS []$TYPE) ([]$RTYPE2, error) {
+                    ...
+                  }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add context.Context as the first parameter to enable cancellation and tracing.
+      example: |
+        // Before — cannot cancel or trace
+        func Transform(records []RawRecord) ([]Record, error) {
+            var out []Record
+            for _, r := range records {
+                rec, err := parse(r)
+                if err != nil {
+                    return nil, err
+                }
+                out = append(out, rec)
+            }
+            return out, nil
+        }
+
+        // After — cancellable and traceable
+        func Transform(ctx context.Context, records []RawRecord) ([]Record, error) {
+            var out []Record
+            for _, r := range records {
+                select {
+                case <-ctx.Done():
+                    return out, ctx.Err()
+                default:
+                }
+                rec, err := parse(ctx, r)
+                if err != nil {
+                    return nil, err
+                }
+                out = append(out, rec)
+            }
+            return out, nil
+        }
+    references:
+      - https://pkg.go.dev/context
+      - https://go.dev/blog/context
+
+  # ── Fan-in / fan-out ────────────────────────────────────────
+
+  - id: go-pipe-channel-fan-in-no-done
+    name: Fan-in pattern without cancellation channel
+    description: >
+      Flags fan-in patterns where multiple goroutines send to a
+      shared output channel without a done channel or context for
+      coordinated cancellation.
+    descriptions:
+      business: >
+        This code has multiple workers feeding into a shared output, but
+        if the output consumer stops for any reason, all workers get
+        permanently stuck. Think of it like assembly line workers feeding
+        parts onto a conveyor belt that stops moving -- they pile up and
+        nobody can leave. Without this fix, errors in downstream stages
+        cause resource leaks that slowly degrade your service's
+        performance and eventually crash it.
+      developer: >
+        Multiple goroutines send to a shared output channel without a
+        done channel or ctx.Done() in the select. What happens is if the
+        consumer stops reading (context cancelled, error, panic), all
+        producer goroutines block forever on the channel send, leaking
+        their stack memory and any resources they hold. The correct
+        pattern is to always use select with ctx.Done() when sending to
+        the shared channel, so producers exit cleanly on cancellation.
+    rationale: >
+      The fan-in pattern — multiple goroutines writing to one
+      channel — is powerful but has a critical failure mode. If
+      the consumer stops reading (context cancelled, error, panic),
+      all producer goroutines block forever on the channel send.
+      These are goroutine leaks: they never exit, their stack
+      memory is never freed, and any resources they hold (database
+      connections, file handles, locks) are permanently leaked.
+      Over time, this exhausts your process's memory and connection
+      pools. The fix is a done channel (or context) that every
+      producer checks before sending. When the consumer is done,
+      it closes the done channel and all producers exit cleanly.
+      This is the foundational pattern from the Go blog's pipeline
+      article and it is non-negotiable for production fan-in code.
+    severity: warning
+    tags: [pipelines, concurrency, goroutine-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              go func(...) {
+                ...
+                $OUT <- ...
+                ...
+              }(...)
+          - pattern-not-inside: |
+              go func(...) {
+                ...
+                select {
+                case $OUT <- ...:
+                  ...
+                case <-$DONE:
+                  ...
+                }
+                ...
+              }(...)
+          - pattern-not-inside: |
+              go func(...) {
+                ...
+                select {
+                case $OUT <- ...:
+                  ...
+                case <-$CTX.Done():
+                  ...
+                }
+                ...
+              }(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use a select with a done channel or ctx.Done() when sending to the shared output channel.
+      example: |
+        // Before — goroutine leaks if consumer stops reading
+        func fanIn(channels ...<-chan Result) <-chan Result {
+            out := make(chan Result)
+            var wg sync.WaitGroup
+            for _, ch := range channels {
+                wg.Add(1)
+                go func(c <-chan Result) {
+                    defer wg.Done()
+                    for val := range c {
+                        out <- val  // blocks forever if consumer exits
+                    }
+                }(ch)
+            }
+            go func() { wg.Wait(); close(out) }()
+            return out
+        }
+
+        // After — producers exit cleanly on cancellation
+        func fanIn(ctx context.Context, channels ...<-chan Result) <-chan Result {
+            out := make(chan Result)
+            var wg sync.WaitGroup
+            for _, ch := range channels {
+                wg.Add(1)
+                go func(c <-chan Result) {
+                    defer wg.Done()
+                    for val := range c {
+                        select {
+                        case out <- val:
+                        case <-ctx.Done():
+                            return
+                        }
+                    }
+                }(ch)
+            }
+            go func() { wg.Wait(); close(out) }()
+            return out
+        }
+    references:
+      - https://go.dev/blog/pipelines
+      - https://pkg.go.dev/context

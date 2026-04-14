@@ -1,0 +1,71 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: test-few-violations
+  name: Test Few Violations
+  version: 0.0.1
+  description: Rules for integration test few-violations fixture.
+  maintainer: test
+
+rules:
+  - id: go-tdd-no-fmt-println
+    name: No fmt.Println outside of main packages
+    description: |
+      Flags any call to fmt.Println in Go source files whose package is not main.
+    rationale: |
+      Production code should use a structured logger, not fmt.Println.
+    severity: error
+    tags:
+      - logging
+      - go
+    detector:
+      backend: go-analysis
+      id: no-fmt-println-outside-main
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+    fix:
+      message: Replace fmt.Println with a structured logger call.
+
+  - id: go-no-panic-outside-main-and-init
+    name: No panic() outside main and init functions
+    description: |
+      Flags any call to panic() inside a function that is not main() or init().
+    rationale: |
+      Go's idiomatic error handling uses explicit error returns rather than panics.
+    severity: error
+    tags:
+      - errors
+      - go
+    detector:
+      backend: go-analysis
+      id: no-panic-outside-main-and-init
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+      - "**/*_test.go"
+    fix:
+      message: Return an error instead of panicking.
+
+  - id: go-no-stdlib-log
+    name: No import "log" outside main packages
+    description: |
+      Flags imports of the standard library "log" package in non-main packages.
+    rationale: |
+      Use a structured logger instead of the standard library log package.
+    severity: error
+    tags:
+      - logging
+      - go
+    detector:
+      backend: go-analysis
+      id: no-stdlib-log-outside-main
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/vendor/**"
+    fix:
+      message: Replace log usage with a structured logger.

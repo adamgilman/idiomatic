@@ -1,0 +1,21 @@
+FROM golang:1.26
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    jq \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# Build the idio CLI binary (orchestrator).
+RUN go build -o /usr/local/bin/idio \
+    -ldflags "-X github.com/adamgilman/idiomatic/cmd/idio/cmd.Version=integration-test" \
+    ./cmd/idio
+
+# Copy fixtures and test harness into the image.
+COPY testing/ /testing/
+
+RUN chmod +x /testing/run-integration-tests.sh
+
+ENTRYPOINT ["/testing/run-integration-tests.sh"]

@@ -1,0 +1,49 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/idio
+    binary: idio
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/adamgilman/idiomatic/cmd/idio/cmd.Version={{.Version}}
+      - -X github.com/adamgilman/idiomatic/cmd/idio/cmd.Commit={{.Commit}}
+      - -X github.com/adamgilman/idiomatic/cmd/idio/cmd.Date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+brews:
+  - repository:
+      owner: adamgilman
+      name: homebrew-tap
+    homepage: https://github.com/adamgilman/idiomatic
+    description: Deterministic enforcement for stochastic development
+    license: Apache-2.0
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'

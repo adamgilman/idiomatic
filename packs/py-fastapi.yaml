@@ -1,0 +1,741 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: py-fastapi
+  name: Python FastAPI
+  version: 0.1.0
+  description: >
+    Principal-level FastAPI rules for Python services. Catches missing
+    input validation, async anti-patterns, dependency injection misuse,
+    and security gaps that cause data corruption, performance degradation,
+    and vulnerabilities in production APIs.
+  descriptions:
+    business: >
+      Your Python API is the front door to your product. This pack catches
+      the mistakes that let attackers in, slow down your users, and make bugs
+      invisible — like accepting any input without validation, blocking all
+      users while one slow query runs, or accidentally exposing internal data
+      in API responses.
+    developer: >
+      FastAPI gives you great defaults, but there are patterns that work fine
+      in development and break under load or attack. These rules enforce
+      proper async discipline, input validation, dependency injection, and
+      security boundaries so your service behaves like production code from
+      day one.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-fastapi.yaml
+  tags:
+    language: python
+    framework: fastapi
+    category: http
+    architecture: [services]
+
+rules:
+  # ── Async anti-patterns ──────────────────────────────────────
+
+  - id: py-fastapi-sync-in-async
+    name: Blocking synchronous call inside async endpoint
+    description: >
+      Flags synchronous blocking calls (time.sleep, open(), requests.get,
+      requests.post) inside async def endpoint handlers. These calls block
+      the event loop thread, freezing all concurrent request processing.
+    descriptions:
+      business: >
+        This code freezes your entire API while waiting for one slow operation
+        to finish. Think of it like a single checkout lane at a grocery store
+        where the cashier stops scanning everyone's items to go find a price
+        check. Every customer in line — every user hitting your API — waits
+        until that one task is done. Under real traffic this causes timeouts,
+        failed requests, and an outage that looks like your server crashed.
+      developer: >
+        A blocking call like time.sleep() or requests.get() inside an async
+        def endpoint halts the asyncio event loop. No other coroutine can
+        advance until the blocking call returns. The fix is to use async
+        equivalents (asyncio.sleep, httpx.AsyncClient) or offload to a
+        thread pool with run_in_executor().
+    rationale: >
+      FastAPI runs async endpoints on a single-threaded asyncio event loop.
+      A blocking call like time.sleep(5) or requests.get() halts the entire
+      loop for the duration of that call — no other request can be processed,
+      no WebSocket frame can be sent, no background task can advance. Under
+      load this causes cascading timeouts across all clients. Use asyncio.sleep,
+      aiofiles, or httpx.AsyncClient instead. If you must call sync code, use
+      run_in_executor() to offload it to a thread pool.
+    severity: error
+    tags: [async, performance, event-loop]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: time.sleep(...)
+              - pattern: requests.get(...)
+              - pattern: requests.post(...)
+              - pattern: open(...)
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              async def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Replace blocking call with its async equivalent or use run_in_executor().
+      example: |
+        # Before — blocks the event loop for 5 seconds
+        @app.get("/slow")
+        async def slow():
+            time.sleep(5)
+            resp = requests.get("https://api.example.com/data")
+            return resp.json()
+
+        # After — non-blocking, event loop stays free
+        @app.get("/slow")
+        async def slow():
+            await asyncio.sleep(5)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get("https://api.example.com/data")
+            return resp.json()
+    references:
+      - https://fastapi.tiangolo.com/async/#very-technical-details
+      - https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools
+
+  # ── Response validation ──────────────────────────────────────
+
+  - id: py-fastapi-no-response-model
+    name: Endpoint missing response_model parameter
+    description: >
+      Flags FastAPI endpoint decorators (@app.get, @app.post, etc.) that
+      do not specify a response_model parameter. Without response_model,
+      the response is not validated and the OpenAPI schema is incomplete.
+    descriptions:
+      business: >
+        Without this fix, your API can accidentally send internal data to
+        users — like password hashes, internal IDs, or billing details that
+        should never leave the server. Think of it like mailing a customer
+        their receipt but accidentally including the entire filing cabinet.
+        One model change by a developer could silently expose sensitive fields
+        to every API consumer.
+      developer: >
+        response_model was omitted from the endpoint decorator. Without it,
+        FastAPI skips output validation and returns whatever the function
+        produces — including fields you did not intend to expose. The correct
+        pattern is to always specify response_model with a Pydantic schema
+        that explicitly declares the public contract.
+    rationale: >
+      response_model serves three purposes: it validates outgoing data
+      (preventing accidental leakage of internal fields like password hashes),
+      it generates accurate OpenAPI documentation for API consumers, and it
+      filters the response to only include declared fields. Without it, your
+      API contract is implicit and any internal model change can leak sensitive
+      data to clients. Principal engineers treat missing response_model the
+      same as missing input validation — it is a contract gap.
+    severity: warning
+    tags: [validation, openapi, contract]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  @$APP.get($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.post($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.put($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.patch($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.delete($PATH, ...)
+                  def $FUNC(...):
+                      ...
+          - pattern-not: |
+              @$APP.$METHOD($PATH, ..., response_model=..., ...)
+              def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Add response_model parameter to the endpoint decorator.
+      example: |
+        # Before — no response validation, incomplete OpenAPI docs
+        @app.get("/users/{user_id}")
+        async def get_user(user_id: int):
+            return db.get_user(user_id)
+
+        # After — response validated, OpenAPI schema generated
+        @app.get("/users/{user_id}", response_model=UserResponse)
+        async def get_user(user_id: int):
+            return db.get_user(user_id)
+    references:
+      - https://fastapi.tiangolo.com/tutorial/response-model/
+      - https://fastapi.tiangolo.com/tutorial/response-model/#response_model-parameter
+
+  - id: py-fastapi-no-status-code
+    name: Endpoint missing status_code parameter
+    description: >
+      Flags FastAPI endpoint decorators that do not specify a status_code
+      parameter. All endpoints default to 200, even POST endpoints that
+      create resources (which should return 201).
+    descriptions:
+      business: >
+        This makes your API lie to the tools and services that depend on it.
+        When every endpoint says "200 OK" even for creating or deleting data,
+        client applications cannot tell what actually happened. Think of it
+        like a shipping company that marks every package "delivered" whether
+        it was delivered, returned, or lost. Automated retry logic and
+        third-party integrations break silently.
+      developer: >
+        The endpoint decorator is missing an explicit status_code parameter,
+        so FastAPI defaults to 200 for everything. POST endpoints that create
+        resources should return 201, DELETE with no body should return 204.
+        The correct pattern is to always declare status_code so the OpenAPI
+        spec and client behavior match the actual semantics.
+    rationale: >
+      HTTP status codes are part of the API contract. A POST endpoint that
+      creates a resource should return 201 Created, not 200 OK. A DELETE
+      that removes a resource with no body should return 204 No Content.
+      Relying on the default 200 for everything signals to API consumers
+      that the team has not thought about REST semantics, and it makes the
+      OpenAPI documentation misleading. Explicit status codes also enable
+      correct client-side retry logic (e.g., not retrying 201s).
+    severity: warning
+    tags: [rest, openapi, contract]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  @$APP.post($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.put($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.patch($PATH, ...)
+                  def $FUNC(...):
+                      ...
+              - pattern: |
+                  @$APP.delete($PATH, ...)
+                  def $FUNC(...):
+                      ...
+          - pattern-not: |
+              @$APP.$METHOD($PATH, ..., status_code=..., ...)
+              def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Add status_code parameter to the endpoint decorator.
+      example: |
+        # Before — POST returns 200 by default
+        @app.post("/users", response_model=UserResponse)
+        async def create_user(user: UserCreate):
+            return crud.create_user(db, user)
+
+        # After — correct 201 Created status
+        @app.post("/users", response_model=UserResponse, status_code=201)
+        async def create_user(user: UserCreate):
+            return crud.create_user(db, user)
+    references:
+      - https://fastapi.tiangolo.com/tutorial/response-status-code/
+      - https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/201
+
+  - id: py-fastapi-raw-dict-response
+    name: Returning plain dict from endpoint
+    description: >
+      Flags endpoint functions that return a dict literal instead of a
+      Pydantic model instance. Dict responses bypass schema validation
+      and produce no OpenAPI documentation.
+    descriptions:
+      business: >
+        This code sends data to your users with no safety net. If a developer
+        changes an internal model, new fields — including sensitive ones —
+        leak to every API consumer with no warning. Think of it like a
+        restaurant handing customers the entire kitchen inventory list instead
+        of a menu. Integration partners and mobile apps will break without
+        warning when the response shape changes.
+      developer: >
+        The endpoint returns a raw dict literal instead of a Pydantic model
+        instance. What happens is FastAPI skips all output validation and
+        serialization, so there is no schema for OpenAPI generation and no
+        guarantee the response matches client expectations. The correct
+        pattern is to define a response model and return an instance of it.
+    rationale: >
+      Returning {"status": "ok", "data": result} is the Python equivalent
+      of returning interface{} in Go — you lose all type safety. There is
+      no validation that the response matches what clients expect, no
+      automatic serialization of datetime/UUID types, and no generated
+      OpenAPI schema for SDK generation. When the response shape changes,
+      clients break silently. A Pydantic model is a few lines of code
+      that prevents entire classes of integration bugs.
+    severity: warning
+    tags: [validation, type-safety, openapi]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: |
+              return {...}
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Return a Pydantic model instance instead of a plain dict.
+      example: |
+        # Before — no validation, no OpenAPI schema
+        @app.get("/health")
+        async def health():
+            return {"status": "ok", "version": "1.2.3"}
+
+        # After — validated, documented, type-safe
+        class HealthResponse(BaseModel):
+            status: str
+            version: str
+
+        @app.get("/health", response_model=HealthResponse)
+        async def health():
+            return HealthResponse(status="ok", version="1.2.3")
+    references:
+      - https://fastapi.tiangolo.com/tutorial/response-model/
+      - https://docs.pydantic.dev/latest/concepts/models/
+
+  # ── Error handling ───────────────────────────────────────────
+
+  - id: py-fastapi-broad-exception-handler
+    name: Catching bare Exception in endpoint handler
+    description: >
+      Flags except Exception or bare except clauses inside FastAPI
+      endpoint functions. Broad exception handlers swallow validation
+      errors, HTTPExceptions, and framework-level errors.
+    descriptions:
+      business: >
+        This code hides errors instead of reporting them. When something goes
+        wrong — bad user input, a permissions failure, a database error —
+        this pattern silently swallows it and returns a generic "OK" response.
+        Think of it like a fire alarm system that catches every alert and
+        responds "all clear." Real problems become invisible, users get
+        corrupted data, and your team cannot diagnose issues from logs.
+      developer: >
+        A bare except Exception was used inside an endpoint. What happens is
+        it catches FastAPI's own HTTPException and RequestValidationError,
+        turning a 422 or 403 into a 200 with garbage data. The correct
+        pattern is to catch only specific exceptions you can handle
+        (IntegrityError, ValueError) and let framework exceptions propagate.
+    rationale: >
+      FastAPI uses exceptions for control flow — HTTPException for error
+      responses, RequestValidationError for input validation failures.
+      Catching bare Exception swallows these, turning a 422 validation
+      error into a 200 with garbage data, or hiding a 403 Forbidden behind
+      a generic 500. It also masks bugs by silently eating unexpected errors
+      that should crash loudly. Catch specific exceptions (ValueError,
+      sqlalchemy.exc.IntegrityError) and let framework exceptions propagate.
+    severity: warning
+    tags: [error-handling, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  try:
+                      ...
+                  except Exception:
+                      ...
+              - pattern: |
+                  try:
+                      ...
+                  except Exception as $E:
+                      ...
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Catch specific exceptions instead of bare Exception.
+      example: |
+        # Before — swallows HTTPException, ValidationError, everything
+        @app.post("/users")
+        async def create_user(user: UserCreate):
+            try:
+                return crud.create_user(db, user)
+            except Exception:
+                return {"error": "something went wrong"}
+
+        # After — catch only what you can handle
+        @app.post("/users", response_model=UserResponse, status_code=201)
+        async def create_user(user: UserCreate):
+            try:
+                return crud.create_user(db, user)
+            except IntegrityError:
+                raise HTTPException(status_code=409, detail="User already exists")
+    references:
+      - https://fastapi.tiangolo.com/tutorial/handling-errors/
+      - https://docs.python.org/3/tutorial/errors.html#handling-exceptions
+
+  # ── Dependency injection ─────────────────────────────────────
+
+  - id: py-fastapi-no-dependency-injection
+    name: Resource created inside endpoint instead of using Depends()
+    description: >
+      Flags endpoint functions that instantiate database sessions, HTTP
+      clients, or service objects directly instead of receiving them
+      via FastAPI's Depends() mechanism.
+    descriptions:
+      business: >
+        This code creates its own database connections and service clients
+        on every request instead of using the framework's built-in resource
+        management. Think of it like every employee bringing their own
+        generator instead of plugging into the building's power grid. It
+        wastes resources, makes the system harder to test, and means bugs
+        that would be caught before launch slip into production.
+      developer: >
+        Resources like Session() or httpx.Client() are being instantiated
+        directly inside the endpoint body. What happens is you lose
+        connection pooling, lifecycle management, and testability. The
+        correct pattern is to use FastAPI's Depends() so resources are
+        injected, properly scoped, and trivially overridable in tests via
+        app.dependency_overrides.
+    rationale: >
+      Creating resources inside endpoint bodies (Session(), httpx.Client(),
+      redis.Redis()) couples the endpoint to concrete implementations,
+      makes unit testing require monkeypatching or mocking imports, and
+      prevents connection pooling and lifecycle management. FastAPI's
+      Depends() is a first-class dependency injection system — use it.
+      Dependencies can be overridden in tests with app.dependency_overrides,
+      making endpoints trivially testable.
+    severity: info
+    tags: [dependency-injection, testability, design]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: $SESSION = Session(...)
+              - pattern: $SESSION = SessionLocal(...)
+              - pattern: $CLIENT = httpx.Client(...)
+              - pattern: $CLIENT = httpx.AsyncClient(...)
+              - pattern: $CONN = redis.Redis(...)
+              - pattern: $CONN = psycopg2.connect(...)
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Use Depends() to inject resources instead of creating them inline.
+      example: |
+        # Before — untestable, no connection lifecycle management
+        @app.get("/users")
+        async def list_users():
+            db = SessionLocal()
+            try:
+                return db.query(User).all()
+            finally:
+                db.close()
+
+        # After — testable, lifecycle managed by the framework
+        def get_db():
+            db = SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        @app.get("/users", response_model=list[UserResponse])
+        async def list_users(db: Session = Depends(get_db)):
+            return db.query(User).all()
+    references:
+      - https://fastapi.tiangolo.com/tutorial/dependencies/
+      - https://fastapi.tiangolo.com/advanced/testing-dependencies/
+
+  # ── Security ─────────────────────────────────────────────────
+
+  - id: py-fastapi-hardcoded-cors-origin
+    name: CORS middleware with wildcard allow_origins
+    description: >
+      Flags CORSMiddleware configured with allow_origins=["*"]. This
+      permits any website to make authenticated cross-origin requests
+      to your API.
+    descriptions:
+      business: >
+        This setting lets any website on the internet make requests to your
+        API as if they were your own app. Think of it like giving every
+        stranger a copy of your office keycard. An attacker can build a
+        phishing page that silently reads your users' data or performs
+        actions on their behalf. This is a direct path to a data breach.
+      developer: >
+        CORSMiddleware was configured with allow_origins=["*"], which tells
+        browsers that any origin is trusted. What happens is cross-origin
+        requests include the user's cookies and Authorization header, so a
+        malicious site can call your API as the logged-in user. The correct
+        pattern is to set allow_origins to an explicit list of trusted
+        domains, loaded from environment variables.
+    rationale: >
+      allow_origins=["*"] means any website on the internet can make
+      requests to your API using the user's cookies or Authorization
+      header. An attacker's malicious page can silently call your API
+      as the logged-in user — reading data, making changes, or
+      exfiltrating tokens. In production, allow_origins must be an
+      explicit list of trusted domains. Use environment variables to
+      configure allowed origins per deployment stage.
+    severity: warning
+    tags: [security, cors, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: |
+          CORSMiddleware(..., allow_origins=["*"], ...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Replace wildcard origin with an explicit list of trusted domains.
+      example: |
+        # Before — any website can make authenticated requests
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+        )
+
+        # After — only trusted origins allowed
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.allowed_origins,  # ["https://app.example.com"]
+            allow_credentials=True,
+        )
+    references:
+      - https://fastapi.tiangolo.com/tutorial/cors/
+      - https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+      - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/07-Testing_Cross_Origin_Resource_Sharing
+
+  - id: py-fastapi-missing-auth-dependency
+    name: Endpoint without authentication dependency
+    description: >
+      Flags endpoint handlers that do not include any authentication or
+      authorization dependency in their parameter list (no Depends() with
+      auth-related functions).
+    descriptions:
+      business: >
+        This endpoint has no login check — anyone on the internet can call
+        it. Think of it like a door in your building with no lock and no
+        sign. As your team adds new endpoints, it is easy to forget the
+        auth guard, especially when using AI to generate code. Without this
+        fix, sensitive data or admin actions could be one URL guess away
+        from public access.
+      developer: >
+        The endpoint function has no Depends() parameter for authentication
+        or authorization, and no dependencies list on the decorator. What
+        happens is the endpoint is implicitly public. The correct pattern is
+        to add an auth dependency via Depends(get_current_user) or use
+        router-level dependencies so every endpoint in the group is
+        protected by default.
+    rationale: >
+      Endpoints without explicit authentication dependencies are
+      implicitly public. In a growing codebase, it is easy to add a
+      new endpoint and forget to add the auth guard — especially when
+      using LLMs to generate boilerplate. Making auth a required
+      dependency parameter makes unauthenticated endpoints visible
+      in code review and prevents accidental exposure. Use a
+      router-level dependency for groups of endpoints that share
+      the same auth requirement.
+    severity: info
+    tags: [security, authentication, design]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: |
+              @$APP.$METHOD(...)
+              def $FUNC(...):
+                  ...
+          - pattern-not: |
+              @$APP.$METHOD(...)
+              def $FUNC(..., $AUTH = Depends(...), ...):
+                  ...
+          - pattern-not: |
+              @$APP.$METHOD(..., dependencies=[...], ...)
+              def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Add an authentication dependency via Depends() or router-level dependencies.
+      example: |
+        # Before — endpoint is implicitly public
+        @app.get("/admin/users")
+        async def list_all_users():
+            return crud.get_all_users(db)
+
+        # After — authentication enforced via dependency
+        @app.get("/admin/users", response_model=list[UserResponse])
+        async def list_all_users(
+            current_user: User = Depends(get_current_admin_user),
+            db: Session = Depends(get_db),
+        ):
+            return crud.get_all_users(db)
+    references:
+      - https://fastapi.tiangolo.com/tutorial/security/
+      - https://fastapi.tiangolo.com/tutorial/dependencies/#dependencies-in-path-operation-decorators
+
+  - id: py-fastapi-sql-injection
+    name: SQL query built with string interpolation
+    description: >
+      Flags f-strings or .format() calls used to build SQL queries
+      passed to database execute methods. This is the most common
+      SQL injection vector in Python.
+    descriptions:
+      business: >
+        This code lets attackers run arbitrary database commands through your
+        API. Think of it like a bank teller who reads any instruction a
+        customer writes on a deposit slip — including "empty all accounts."
+        A single malicious request could delete your entire database, steal
+        every user's data, or bypass all access controls. This is the #3
+        vulnerability on the OWASP Top 10.
+      developer: >
+        An f-string or .format() was used to build a SQL query passed to
+        execute(). What happens is user-controlled input becomes part of the
+        SQL syntax, enabling injection. The correct pattern is to always use
+        parameterized queries (text("SELECT ... WHERE id = :id"), {"id":
+        user_id}) so the database driver handles escaping.
+    rationale: >
+      String-interpolated SQL (f"SELECT * FROM users WHERE id = {user_id}")
+      allows an attacker to inject arbitrary SQL by controlling the
+      interpolated value. A malicious user_id like "1; DROP TABLE users"
+      executes as part of the query. Parameterized queries send the query
+      structure and data separately, making injection impossible regardless
+      of input content. This is OWASP A03:2021 — Injection.
+    severity: error
+    tags: [security, sql-injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: $DB.execute(f"...")
+          - pattern: $CURSOR.execute(f"...")
+          - pattern: $DB.execute("...".format(...))
+          - pattern: $CURSOR.execute("...".format(...))
+          - pattern: $SESSION.execute(f"...")
+          - pattern: $CONN.execute(f"...")
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Use parameterized queries instead of string interpolation.
+      example: |
+        # Before — SQL injection via user_id
+        @app.get("/users/{user_id}")
+        async def get_user(user_id: int, db: Session = Depends(get_db)):
+            result = db.execute(f"SELECT * FROM users WHERE id = {user_id}")
+            return result.fetchone()
+
+        # After — parameterized query, injection impossible
+        @app.get("/users/{user_id}", response_model=UserResponse)
+        async def get_user(user_id: int, db: Session = Depends(get_db)):
+            result = db.execute(
+                text("SELECT * FROM users WHERE id = :id"),
+                {"id": user_id},
+            )
+            return result.fetchone()
+    references:
+      - https://docs.sqlalchemy.org/en/20/tutorial/dbapi_transactions.html#sending-parameters
+      - https://owasp.org/www-community/attacks/SQL_Injection
+      - https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html
+
+  - id: py-fastapi-secret-in-default
+    name: Secret or password as default parameter value
+    description: >
+      Flags Pydantic Settings or config classes that have secret keys,
+      passwords, tokens, or API keys defined with hardcoded default
+      string values instead of requiring them from the environment.
+    descriptions:
+      business: >
+        This code has passwords or API keys written directly in the source
+        code with fallback values. Think of it like writing your bank PIN on
+        the back of your debit card. These secrets end up in version control
+        history, CI logs, and build artifacts — and if a developer forgets
+        to set the real secret, the hardcoded dummy value goes to production,
+        leaving your system wide open.
+      developer: >
+        A secret field (secret_key, api_key, token, etc.) was defined with a
+        hardcoded default string value in a settings class. What happens is
+        developers can run the app without setting the environment variable,
+        and the placeholder value silently ships to production. The correct
+        pattern is to declare secrets with no default (or as SecretStr) so
+        the application fails fast at startup if the variable is missing.
+    rationale: >
+      Hardcoded secrets in source code get committed to version control,
+      appear in CI logs, leak through error messages, and persist in
+      build artifacts. When a secret has a default value, developers
+      run the application without setting the environment variable and
+      the hardcoded value silently goes to production. Secrets must
+      have no default (forcing a startup failure if unset) or use
+      SecretStr with no default. This is OWASP A07:2021 —
+      Identification and Authentication Failures.
+    severity: error
+    tags: [security, secrets, owasp, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  $KEY: str = "$VALUE"
+              - pattern: |
+                  $KEY = "$VALUE"
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: "(?i)(secret|password|passwd|api_key|apikey|token|private_key|auth_key)"
+          - pattern-inside: |
+              class $CONFIG(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Remove default values for secrets. Use environment variables with no fallback.
+      example: |
+        # Before — secret committed to git, used if env var is missing
+        class Settings(BaseSettings):
+            database_url: str = "postgresql://localhost/mydb"
+            secret_key: str = "super-secret-key-123"
+            api_key: str = "sk-1234567890"
+
+        # After — startup fails if secrets are not in the environment
+        class Settings(BaseSettings):
+            database_url: str = "postgresql://localhost/mydb"  # non-secret, default OK
+            secret_key: SecretStr  # no default — required from environment
+            api_key: SecretStr     # no default — required from environment
+
+            model_config = SettingsConfigDict(env_file=".env")
+    references:
+      - https://docs.pydantic.dev/latest/concepts/pydantic_settings/
+      - https://docs.pydantic.dev/latest/api/types/#pydantic.SecretStr
+      - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/

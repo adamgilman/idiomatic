@@ -1,0 +1,29 @@
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: test-pack
+  name: Test Pack
+  version: 0.1.0
+  description: Test pack.
+  maintainer: test
+
+rules:
+  - id: bad-test-rule
+    name: Rule with bad tests
+    description: A rule with invalid test fixtures.
+    rationale: Testing test validation.
+    severity: error
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: x
+    applies_to:
+      - "**/*.go"
+    fix:
+      message: Fix it.
+    tests:
+      - name: ""
+        should: explode
+        code: ""

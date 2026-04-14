@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: gosec
+  version: 1.0.0
+  description: Go security analyzer (gosec) — wraps the binary, filters by Go files, includes only the rule IDs the pack asks for
+
+spec:
+  applies_to_files:
+    extensions: [".go"]
+
+  requires:
+    binary: gosec
+    install: "go install github.com/securego/gosec/v2/cmd/gosec@latest"
+
+  inputs:
+    rule_id:
+      type: string
+      required: true
+      description: gosec rule ID like G101, G201
+
+  run:
+    per: batch
+    argv:
+      - "-fmt=json"
+      - "-quiet"
+      - "-include={{ .RuleIDs | join \",\" }}"
+      - "{files}"
+    timeout: 60s
+    ok_exit: [1]
+    output: stdout
+
+  signal:
+    shape: list
+    source: stdout
+    format: json
+    list: Issues
+    match_rule_by:
+      strategy: by_input
+      field: rule_id
+      from: rule_id
+    fields:
+      file: file
+      line: line
+      col: column
+      message: details
+      severity: severity
+    severity_map:
+      HIGH: error
+      MEDIUM: warning
+      LOW: info

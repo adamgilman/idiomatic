@@ -1,0 +1,622 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: docker-security
+  name: Docker Security
+  version: 0.1.0
+  description: >
+    Principal-level Dockerfile review rules. Catches container images
+    running as root, unpinned base images, secret leakage through
+    build args, and layer ordering anti-patterns that bloat images
+    and weaken security posture.
+  descriptions:
+    business: >
+      Your Dockerfiles define the security posture and reliability of every
+      container you ship. This pack catches the mistakes that lead to
+      security breaches (containers running as root, secrets baked into
+      images), broken deployments (unpinned base images that change without
+      warning), and wasted infrastructure spend (bloated images with
+      hundreds of megabytes of unnecessary cache data). These are the
+      issues that show up in security audits and incident postmortems.
+    developer: >
+      These rules catch the Dockerfile anti-patterns that pass code review
+      because they "build fine" but cause problems in production -- missing
+      USER instructions that leave containers running as root, unpinned
+      FROM tags that make builds non-reproducible, secrets passed through
+      ARG/ENV that persist in image layers, and missing cleanup steps that
+      bloat images. If you have ever debugged a "works on my machine" image
+      issue, these rules prevent the next one.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/docker-security.yaml
+  tags:
+    vendor: docker
+    category: infrastructure
+    architecture: [services, workers, pipelines]
+
+rules:
+  # ── Privilege & user ─────────────────────────────────────────
+
+  - id: docker-no-user
+    name: Dockerfile must set a non-root USER
+    description: >
+      Flags Dockerfiles that never set a USER instruction. Without an
+      explicit USER, the container process runs as root (UID 0), which
+      is a privilege escalation vector if the container is compromised.
+    descriptions:
+      business: >
+        Without a USER instruction, your container runs with full
+        administrator privileges. If an attacker exploits any vulnerability
+        in your application, they get root access to the underlying server.
+        Think of it like running your entire business as the admin account
+        instead of creating individual user accounts. This is the number
+        one finding in container security audits and puts customer data
+        directly at risk.
+      developer: >
+        This Dockerfile never sets a USER instruction, so the container
+        process runs as root (UID 0). A container breakout with root
+        inside gives the attacker root on the host (unless user namespaces
+        are enabled, which most clusters do not use). Add a USER
+        instruction near the end of the Dockerfile that drops to a
+        non-root identity. This is the single highest-impact Dockerfile
+        security control.
+    rationale: >
+      Running as root inside a container means a container breakout gives
+      the attacker root on the host (unless user namespaces are enabled,
+      which most clusters do not). Every production Dockerfile should end
+      with a USER instruction that drops to a non-root identity. This is
+      the single highest-impact Dockerfile security control.
+    severity: error
+    tags: [docker, security, root]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        patterns:
+          - pattern: |
+              FROM $IMAGE
+              ...
+          - pattern-not-inside: |
+              FROM $IMAGE
+              ...
+              USER $USER
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Add a USER instruction to run the container as a non-root user.
+      example: |
+        # Before
+        FROM node:20-slim
+        COPY . /app
+        CMD ["node", "server.js"]
+
+        # After
+        FROM node:20-slim
+        RUN groupadd -r app && useradd -r -g app app
+        COPY --chown=app:app . /app
+        USER app
+        CMD ["node", "server.js"]
+    references:
+      - https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user
+      - https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html
+
+  - id: docker-run-as-root-explicit
+    name: Do not explicitly set USER root or USER 0
+    description: >
+      Flags USER root or USER 0 instructions. Even in multi-stage builds,
+      explicitly switching to root mid-Dockerfile is risky if the final
+      USER is not reset to a non-root identity.
+    descriptions:
+      business: >
+        Explicitly switching to the root user in a Dockerfile is a
+        security red flag. Even if it seems harmless during the build,
+        a future edit could accidentally leave the container running as
+        root in production. Think of it like temporarily propping open a
+        secure door -- someone might forget to close it. This creates a
+        latent security vulnerability that may not surface until a breach
+        occurs.
+      developer: >
+        This Dockerfile explicitly sets USER root or USER 0. If build
+        steps require root (e.g., apt-get install), they should run before
+        the USER instruction, not after a USER root switch. If root is set
+        in an intermediate stage, it does not affect the final image, but
+        it signals sloppy layering. Worst case, a later refactor removes
+        the final USER line and the image silently ships as root.
+        Restructure so privileged steps come first.
+    rationale: >
+      USER root in a Dockerfile is almost always a mistake or a shortcut
+      that was never cleaned up. If build steps require root (e.g.,
+      apt-get install), they should run before the USER instruction. If
+      root is set in an intermediate stage, it does not affect the final
+      image, but it signals sloppy layering and confuses reviewers. Worst
+      case, a later refactor removes the final USER line and the image
+      silently ships as root.
+    severity: error
+    tags: [docker, security, root]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        pattern-either:
+          - pattern: USER root
+          - pattern: USER 0
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Remove the explicit USER root/0 and restructure so privileged steps run before USER.
+      example: |
+        # Before
+        FROM node:20-slim
+        USER root
+        RUN apt-get update && apt-get install -y curl
+        USER app
+
+        # After — run installs before USER, no need for USER root
+        FROM node:20-slim
+        RUN apt-get update && apt-get install -y curl
+        RUN useradd -r app
+        USER app
+    references:
+      - https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user
+
+  # ── Supply chain & reproducibility ───────────────────────────
+
+  - id: docker-latest-tag
+    name: Pin base image tags — do not use :latest or omit the tag
+    description: >
+      Flags FROM instructions that use the :latest tag or omit the tag
+      entirely (which defaults to :latest). Builds become
+      non-reproducible and can break without warning when the upstream
+      image publishes a new version.
+    descriptions:
+      business: >
+        Using an unpinned base image means your builds depend on whatever
+        version the image registry happens to serve today. A build that
+        works on Monday can break on Tuesday because the upstream image
+        changed. Think of it like ordering supplies with "send whatever
+        you have" -- you might get something incompatible. This causes
+        unpredictable build failures that delay releases and make
+        debugging nearly impossible.
+      developer: >
+        This FROM instruction uses :latest or omits the tag entirely
+        (which defaults to :latest). Your build output depends on whatever
+        the registry serves today, making builds non-reproducible. A new
+        upstream major version can silently break your image. Pin to a
+        specific version tag (node:20.11.1-slim) or, better, a digest
+        (@sha256:...) for hermetic builds. This is table-stakes for any
+        CI pipeline.
+    rationale: >
+      Using FROM node (no tag) or FROM node:latest means your build
+      output depends on whatever the registry happens to serve today.
+      A Monday build may work and a Tuesday build may break because the
+      upstream pushed a new major version. Pin to a specific version
+      (node:20.11.1-slim) or, better, a digest (@sha256:...) for
+      hermetic builds. This is table-stakes for any CI pipeline.
+    severity: error
+    tags: [docker, reproducibility, supply-chain]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        patterns:
+          - pattern: FROM $IMAGE
+          - metavariable-regex:
+              metavariable: $IMAGE
+              regex: "^[^:@]+$|.*:latest$"
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Pin the base image to a specific version tag or digest.
+      example: |
+        # Before
+        FROM node
+        FROM python:latest
+
+        # After
+        FROM node:20.11.1-slim
+        FROM python:3.12.2-slim@sha256:abcd1234...
+    references:
+      - https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#from
+      - https://github.com/hadolint/hadolint/wiki/DL3007
+
+  - id: docker-run-curl-pipe-sh
+    name: Do not pipe curl/wget output to a shell
+    description: >
+      Flags RUN instructions that download a script with curl or wget
+      and pipe it directly to sh/bash. This pattern executes unverified
+      remote code and is a supply chain attack vector.
+    descriptions:
+      business: >
+        Piping a downloaded script directly into a shell means your build
+        blindly executes whatever code a remote server sends. If that
+        server is compromised or the connection is intercepted, an
+        attacker can inject malicious code directly into your container
+        image. Think of it like signing a contract without reading it --
+        you have no idea what you just agreed to. This is a supply chain
+        attack vector that can compromise every container you deploy.
+      developer: >
+        This RUN instruction pipes curl/wget output directly to sh/bash.
+        A MITM attack or compromised server can inject arbitrary code into
+        your image. Instead, download the script to a file, verify its
+        SHA256 checksum, then execute it. If you control the script,
+        vendor it into the repo and COPY it in. Never execute unverified
+        remote code in a build.
+    rationale: >
+      curl | sh is the most exploitable pattern in a Dockerfile. A MITM
+      or compromised server can inject arbitrary code into your image.
+      Instead, download the script, verify its checksum, then execute.
+      If you control the script, vendor it into the repo and COPY it in.
+    severity: error
+    tags: [docker, security, supply-chain]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        pattern-either:
+          - pattern: "RUN ... curl ... | ... sh ..."
+          - pattern: "RUN ... curl ... | ... bash ..."
+          - pattern: "RUN ... wget ... | ... sh ..."
+          - pattern: "RUN ... wget ... | ... bash ..."
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Download the script, verify its checksum, then execute it separately.
+      example: |
+        # Before
+        RUN curl -fsSL https://example.com/install.sh | sh
+
+        # After
+        RUN curl -fsSL -o /tmp/install.sh https://example.com/install.sh && \
+            echo "expected_sha256  /tmp/install.sh" | sha256sum -c - && \
+            sh /tmp/install.sh && \
+            rm /tmp/install.sh
+    references:
+      - https://blog.aquasec.com/docker-security-best-practices
+      - https://github.com/hadolint/hadolint/wiki/DL4001
+
+  # ── Secrets ──────────────────────────────────────────────────
+
+  - id: docker-env-secret
+    name: Do not store secrets in ENV instructions
+    description: >
+      Flags ENV instructions whose variable name contains PASSWORD,
+      SECRET, TOKEN, API_KEY, or PRIVATE_KEY. Secrets set with ENV
+      are baked into every layer of the image and visible via
+      docker inspect and docker history.
+    descriptions:
+      business: >
+        Storing secrets like passwords or API keys in a Dockerfile's ENV
+        instruction permanently embeds them in the container image where
+        anyone with access to the image can read them. Think of it like
+        writing the office safe combination on the outside of the door.
+        This is a data breach waiting to happen -- leaked images or
+        registries immediately expose all embedded credentials.
+      developer: >
+        This ENV instruction contains what appears to be a secret
+        (PASSWORD, TOKEN, API_KEY, etc.). ENV values persist in the image
+        metadata forever and are visible via docker inspect and docker
+        history. Even unsetting them in a later layer does not remove them
+        from the original layer. Use Docker BuildKit secret mounts
+        (--mount=type=secret) or inject secrets at runtime via environment
+        variables passed at container start.
+    rationale: >
+      ENV values persist in the image metadata forever. Even if you
+      unset them in a later layer, the original layer still contains
+      the value and can be extracted. Use Docker BuildKit secrets
+      (--mount=type=secret) or runtime injection via environment
+      variables passed at container start.
+    severity: error
+    tags: [docker, security, secrets]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        patterns:
+          - pattern: ENV $KEY $VAL
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: "(?i).*(PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY).*"
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Use Docker BuildKit secrets or inject at runtime instead of ENV.
+      example: |
+        # Before
+        ENV DATABASE_PASSWORD=hunter2
+
+        # After — use BuildKit secret mount
+        RUN --mount=type=secret,id=db_password \
+            export DATABASE_PASSWORD=$(cat /run/secrets/db_password) && \
+            ./configure --db-pass="$DATABASE_PASSWORD"
+    references:
+      - https://docs.docker.com/build/building/secrets/
+      - https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html
+
+  - id: docker-arg-secret
+    name: Do not pass secrets via ARG instructions
+    description: >
+      Flags ARG instructions whose name contains PASSWORD, SECRET,
+      TOKEN, API_KEY, or PRIVATE_KEY. Build args are visible in
+      docker history and image metadata, making them unsuitable for
+      secrets.
+    descriptions:
+      business: >
+        Passing secrets as build arguments means they are recorded in
+        plaintext in the image's build history, where anyone who can pull
+        the image can read them. Think of it like dictating your credit
+        card number in a meeting that is being recorded. This is
+        especially dangerous in CI/CD pipelines where images may be pushed
+        to shared registries, exposing credentials to a wide audience.
+      developer: >
+        This ARG instruction contains what appears to be a secret. ARG
+        values appear in plaintext in docker history --no-trunc -- anyone
+        with access to the image can extract them. This is a frequently
+        exploited misconfiguration in CI/CD pipelines where secrets are
+        passed as --build-arg. Use BuildKit secret mounts instead
+        (RUN --mount=type=secret,id=...) as they never persist in image
+        layers.
+    rationale: >
+      ARG values appear in plaintext in docker history --no-trunc.
+      Anyone with access to the image can read them. This is a
+      frequently exploited misconfiguration in CI/CD pipelines where
+      secrets are passed as --build-arg. Use BuildKit secret mounts
+      instead — they never persist in image layers.
+    severity: error
+    tags: [docker, security, secrets]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        patterns:
+          - pattern: ARG $KEY
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: "(?i).*(PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY).*"
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Use Docker BuildKit secret mounts instead of ARG for sensitive values.
+      example: |
+        # Before
+        ARG GITHUB_TOKEN
+        RUN git clone https://${GITHUB_TOKEN}@github.com/org/repo.git
+
+        # After — use BuildKit secret mount
+        RUN --mount=type=secret,id=github_token \
+            GITHUB_TOKEN=$(cat /run/secrets/github_token) && \
+            git clone https://${GITHUB_TOKEN}@github.com/org/repo.git
+    references:
+      - https://docs.docker.com/build/building/secrets/
+      - https://github.com/hadolint/hadolint/wiki/DL3059
+
+  # ── Layer hygiene ────────────────────────────────────────────
+
+  - id: docker-add-instead-of-copy
+    name: Use COPY instead of ADD
+    description: >
+      Flags ADD instructions that could be replaced with COPY. ADD has
+      implicit tar extraction and remote URL fetching, both of which
+      introduce surprising behavior and potential security risks.
+    descriptions:
+      business: >
+        The ADD instruction has hidden behaviors -- it can automatically
+        extract compressed files and download files from the internet,
+        which introduces security risks and unpredictable builds. Think of
+        it like a mail clerk who opens every package and installs what is
+        inside without checking first. Using COPY instead is more explicit
+        and predictable, reducing the chance of unexpected behavior in
+        production.
+      developer: >
+        This Dockerfile uses ADD where COPY would suffice. ADD does three
+        things (copy, extract tarballs, fetch URLs) while COPY does one
+        (copy files). Use COPY for file copying, and for URL fetching use
+        RUN curl/wget so you can verify checksums. ADD from a URL also
+        does not cache properly in BuildKit. Follow the principle of least
+        surprise.
+    rationale: >
+      ADD does three things: copy files, extract tarballs, and fetch URLs.
+      COPY does one thing: copy files. In the principle of least surprise,
+      always use COPY unless you specifically need tar auto-extraction.
+      For URL fetching, use RUN curl/wget so you can verify checksums.
+      ADD from a URL also does not cache properly in BuildKit.
+    severity: warning
+    tags: [docker, security, best-practice]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        pattern: ADD $SRC $DEST
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Replace ADD with COPY unless you need tar auto-extraction.
+      example: |
+        # Before
+        ADD requirements.txt /app/
+        ADD https://example.com/bin /usr/local/bin/
+
+        # After
+        COPY requirements.txt /app/
+        RUN curl -fsSL -o /usr/local/bin/bin https://example.com/bin && \
+            chmod +x /usr/local/bin/bin
+    references:
+      - https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#add-or-copy
+      - https://github.com/hadolint/hadolint/wiki/DL3020
+
+  - id: docker-run-apt-no-clean
+    name: Clean apt cache in the same RUN layer as apt-get install
+    description: >
+      Flags RUN instructions that run apt-get install without also
+      running apt-get clean or rm -rf /var/lib/apt/lists/* in the
+      same RUN command. The package cache remains in the layer,
+      bloating the image by tens or hundreds of megabytes.
+    descriptions:
+      business: >
+        Failing to clean up package manager caches in the same build step
+        permanently adds tens to hundreds of megabytes of junk data to
+        every container image. This inflates storage costs, slows down
+        deployments, and wastes network bandwidth every time a container
+        starts. Think of it like shipping a product with all the
+        packaging materials still inside -- you are paying to store and
+        transfer waste.
+      developer: >
+        This RUN instruction runs apt-get install without cleaning up in
+        the same layer. Docker layers are immutable, so cleaning up in a
+        subsequent RUN does not remove the cache from the first layer --
+        it is just hidden, not deleted. Combine install and cleanup in a
+        single RUN with && to ensure the cache never materializes in any
+        layer. This is the most common cause of bloated Debian/Ubuntu
+        images.
+    rationale: >
+      Docker layers are immutable. If you apt-get install in one RUN
+      and clean up in the next, the cache still exists in the first
+      layer — it is just hidden, not removed. Combining install and
+      cleanup in a single RUN ensures the cache never materializes
+      in any layer. This is the single most common cause of bloated
+      Debian/Ubuntu-based images.
+    severity: warning
+    tags: [docker, image-size, optimization]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        patterns:
+          - pattern: "RUN ... apt-get install ..."
+          - pattern-not: "RUN ... apt-get install ... && ... rm -rf /var/lib/apt/lists/* ..."
+          - pattern-not: "RUN ... apt-get install ... && ... apt-get clean ..."
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Add apt-get clean and rm -rf /var/lib/apt/lists/* in the same RUN.
+      example: |
+        # Before
+        RUN apt-get update && apt-get install -y curl
+
+        # After
+        RUN apt-get update && \
+            apt-get install -y --no-install-recommends curl && \
+            apt-get clean && \
+            rm -rf /var/lib/apt/lists/*
+    references:
+      - https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#apt-get
+      - https://github.com/hadolint/hadolint/wiki/DL3009
+
+  # ── Network & runtime ───────────────────────────────────────
+
+  - id: docker-expose-ssh
+    name: Do not EXPOSE port 22 (SSH)
+    description: >
+      Flags EXPOSE 22 instructions. Running SSH inside a container is
+      an anti-pattern that increases attack surface and complicates
+      secret management.
+    descriptions:
+      business: >
+        Exposing SSH (port 22) in a container means treating it like a
+        traditional server, which defeats the purpose of containerization.
+        It adds an entire attack surface for key management and
+        authentication. Think of it like adding a second front door to
+        your house that uses a completely different lock system -- it
+        doubles the ways someone can break in. Use built-in container
+        debugging tools instead.
+      developer: >
+        This Dockerfile exposes port 22 (SSH). Running an SSH daemon
+        inside a container means managing keys, PAM, and a sshd process
+        in a unit that should be ephemeral and immutable. Use kubectl
+        exec, docker exec, or ECS execute-command for debugging. EXPOSE
+        22 is a strong signal that the container is being treated as a
+        VM, which is an anti-pattern.
+    rationale: >
+      SSH in containers means managing keys, PAM, and a daemon inside
+      a unit that should be ephemeral and immutable. Use kubectl exec,
+      docker exec, or ECS execute-command for debugging. If you need
+      file transfer, use a sidecar or shared volume. EXPOSE 22 is a
+      strong signal that the container is being treated as a VM.
+    severity: warning
+    tags: [docker, security, ssh]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        pattern: EXPOSE 22
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Remove EXPOSE 22 and use kubectl exec or docker exec for container access.
+      example: |
+        # Before
+        EXPOSE 22
+        EXPOSE 8080
+
+        # After
+        EXPOSE 8080
+    references:
+      - https://cloud.google.com/architecture/best-practices-for-operating-containers#avoid_ssh
+      - https://jpetazzo.github.io/2014/06/23/docker-ssh-considered-evil/
+
+  # ── Observability ────────────────────────────────────────────
+
+  - id: docker-healthcheck-missing
+    name: Dockerfile should include a HEALTHCHECK instruction
+    description: >
+      Flags Dockerfiles that do not contain a HEALTHCHECK instruction.
+      Without HEALTHCHECK, Docker and orchestrators like ECS cannot
+      distinguish a running-but-broken container from a healthy one.
+    descriptions:
+      business: >
+        Without a health check, your system cannot tell the difference
+        between a container that is working and one that has silently
+        crashed. Think of it like a smoke detector with no batteries --
+        the infrastructure looks like it is protected, but no alarm will
+        sound when something goes wrong. This means outages last longer
+        because the system never automatically detects and replaces broken
+        containers.
+      developer: >
+        This Dockerfile has no HEALTHCHECK instruction. A container can
+        be "running" while the application inside is deadlocked, OOMing,
+        or stuck in a crash loop that does not kill PID 1. HEALTHCHECK
+        gives the runtime a way to detect this and restart the container.
+        In ECS, HEALTHCHECK is the primary mechanism for rolling-deployment
+        health gates. In Kubernetes, probes are configured externally, so
+        this mainly matters for Docker Compose and ECS deployments.
+    rationale: >
+      A container can be "running" while the application inside is
+      deadlocked, out of memory, or stuck in a crash loop that doesn't
+      kill the PID 1 process. HEALTHCHECK gives the runtime a way to
+      detect this and restart the container. In ECS, HEALTHCHECK is
+      the primary mechanism for rolling-deployment health gates. In
+      Kubernetes, liveness/readiness probes are configured externally,
+      so this is mainly relevant for Docker Compose and ECS.
+    severity: info
+    tags: [docker, health-check, reliability]
+    detector:
+      capability: semgrep
+      config:
+        language: dockerfile
+        patterns:
+          - pattern: |
+              FROM $IMAGE
+              ...
+          - pattern-not-inside: |
+              ...
+              HEALTHCHECK ...
+    applies_to: ["**/Dockerfile", "**/Dockerfile.*", "**/*.dockerfile"]
+    excludes: []
+    fix:
+      message: Add a HEALTHCHECK instruction to enable container health monitoring.
+      example: |
+        # Before
+        FROM node:20-slim
+        COPY . /app
+        CMD ["node", "server.js"]
+
+        # After
+        FROM node:20-slim
+        COPY . /app
+        HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+          CMD curl -f http://localhost:3000/health || exit 1
+        CMD ["node", "server.js"]
+    references:
+      - https://docs.docker.com/reference/dockerfile/#healthcheck
+      - https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html#container_definition_healthcheck

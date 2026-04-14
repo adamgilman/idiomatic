@@ -1,0 +1,627 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-redis
+  name: Go Redis
+  version: 0.1.0
+  description: >
+    Principal-level Redis rules for Go services. Catches dangerous
+    commands in production, missing TTLs, connection lifecycle issues,
+    and caching anti-patterns that cause memory exhaustion, blocking,
+    or data loss.
+  descriptions:
+    business: >
+      These rules protect your caching and data storage layer from
+      common mistakes that cause outages. Problems here look like sudden
+      freezes affecting all users, permanent data loss with no recovery,
+      and memory exhaustion that crashes your service. Redis issues are
+      especially dangerous because Redis is often shared across multiple
+      services, so one bad command can take down your entire platform.
+    developer: >
+      This pack covers Redis anti-patterns in Go: blocking commands like
+      KEYS that freeze the event loop, missing TTLs that cause OOM,
+      connection pool leaks, swallowed errors via .Val(), pipeline
+      correctness issues, and distributed locking pitfalls. Each rule
+      targets a real production failure mode specific to go-redis usage
+      patterns.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-redis.yaml
+  tags:
+    language: go
+    vendor: redis
+    category: data-store
+    architecture: [services, workers]
+
+rules:
+  # ── Dangerous commands ─────────────────────────────────────────
+
+  - id: go-redis-keys-in-production
+    name: KEYS command used in production code
+    description: >
+      Calling .Keys() with a broad pattern such as "*". The KEYS
+      command scans the entire keyspace in a single-threaded blocking
+      operation, freezing every other client connected to that Redis
+      instance.
+    descriptions:
+      business: >
+        This code could freeze your entire caching layer for seconds at
+        a time, affecting every user on your platform simultaneously.
+        Think of it like a single customer asking a warehouse worker to
+        open and inspect every box in the building -- nothing else gets
+        done until they finish. Without this fix, a single call can cause
+        a platform-wide outage whenever the dataset is large enough.
+      developer: >
+        The KEYS command is being used with a broad pattern, which scans
+        the entire keyspace while blocking Redis's single-threaded event
+        loop. What happens is every other client -- across all services
+        sharing this Redis -- is frozen for the duration. The correct
+        pattern is to use SCAN, which returns results incrementally and
+        yields the event loop between batches.
+    rationale: >
+      Redis is single-threaded for command processing. KEYS iterates
+      every key in the database, holding the event loop for the entire
+      duration. On a production instance with millions of keys, this
+      takes seconds — during which no other client can execute any
+      command. Timeouts cascade through every service sharing that
+      Redis. The Redis documentation itself warns "KEYS should only be
+      used in production environments with extreme care." Use SCAN
+      instead: it returns results incrementally, yielding the event
+      loop between batches so other clients are not blocked.
+    severity: error
+    tags: [redis, performance, blocking-command]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $CLIENT.Keys($CTX, "*")
+              - pattern: $CLIENT.Keys($CTX, "...")
+          - pattern-not-inside: |
+              func Test$F(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Replace KEYS with SCAN to iterate the keyspace without blocking Redis.
+      example: |
+        // Before — blocks Redis for the entire scan
+        keys, err := rdb.Keys(ctx, "user:*").Result()
+
+        // After — incremental, non-blocking iteration
+        var cursor uint64
+        for {
+            keys, cursor, err := rdb.Scan(ctx, cursor, "user:*", 100).Result()
+            if err != nil { return err }
+            // process keys...
+            if cursor == 0 { break }
+        }
+    references:
+      - https://redis.io/docs/latest/commands/keys/
+      - https://redis.io/docs/latest/commands/scan/
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#Client.Scan
+
+  - id: go-redis-flushall
+    name: FlushAll or FlushDB used in production code
+    description: >
+      Calling FlushAll() or FlushDB() outside of test code. These
+      commands destroy all data in the database instantly and
+      irreversibly.
+    descriptions:
+      business: >
+        This code can wipe out your entire cache or data store instantly
+        with no way to undo it. Think of it like having a "delete
+        everything" button with no confirmation dialog sitting in your
+        production code. Without this fix, a single execution destroys
+        all cached data, causing a stampede of requests to your backend
+        database that can cascade into a full outage.
+      developer: >
+        FlushAll() or FlushDB() is called outside of test code. What
+        happens is every key in the database is deleted instantly and
+        irreversibly -- there is no confirmation, no undo, and no
+        recovery without an RDB/AOF backup. The correct pattern is to
+        never use these commands in production code; use targeted Del()
+        calls or key expiration instead.
+    rationale: >
+      FlushAll deletes every key across all databases; FlushDB deletes
+      every key in the current database. There is no confirmation, no
+      undo, and no recovery unless you have a recent RDB/AOF backup.
+      In a shared Redis instance this wipes data belonging to every
+      service. Even in a dedicated instance, a single misrouted call
+      destroys the entire cache, causing a thundering herd of cache
+      misses against your backend database. These commands have no
+      legitimate use in production code — they exist for development
+      and testing only.
+    severity: error
+    tags: [redis, dangerous-command, data-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $CLIENT.FlushAll(...)
+              - pattern: $CLIENT.FlushDB(...)
+          - pattern-not-inside: |
+              func Test$F(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Remove FlushAll/FlushDB from production code. Use targeted Del() calls or key expiration instead.
+      example: |
+        // Before — destroys all data
+        rdb.FlushAll(ctx)
+
+        // After — delete specific keys by pattern using SCAN + DEL
+        var cursor uint64
+        for {
+            keys, cursor, err := rdb.Scan(ctx, cursor, "session:*", 100).Result()
+            if err != nil { return err }
+            if len(keys) > 0 {
+                rdb.Del(ctx, keys...)
+            }
+            if cursor == 0 { break }
+        }
+    references:
+      - https://redis.io/docs/latest/commands/flushall/
+      - https://redis.io/docs/latest/commands/flushdb/
+
+  # ── Context usage ──────────────────────────────────────────────
+
+  - id: go-redis-no-context
+    name: Redis operation using context.Background()
+    description: >
+      Redis commands called with context.Background() instead of a
+      request-scoped context. Operations cannot be cancelled when the
+      upstream request times out or is cancelled.
+    descriptions:
+      business: >
+        This code keeps running Redis operations even after the user has
+        given up and left. Think of it like a restaurant kitchen that
+        keeps cooking orders after the customer has walked out -- you
+        waste resources on work nobody will use. Under heavy load, these
+        orphaned operations pile up, exhaust your connection pool, and
+        can take down the service for all users.
+      developer: >
+        Redis commands are called with context.Background() instead of a
+        request-scoped context. What happens is the operation cannot be
+        cancelled when the upstream request times out or the client
+        disconnects, so orphaned operations hold connections from the pool
+        indefinitely. The correct pattern is to always pass the
+        request-scoped ctx so Redis operations are cancelled when the
+        requester is gone.
+    rationale: >
+      In a request-handling goroutine, every outbound call — including
+      Redis — should be tied to the request context. With
+      context.Background(), if the client disconnects or the load
+      balancer times out, the Redis operation continues to completion,
+      holding a connection from the pool and consuming Redis server
+      time for a result nobody will read. Under load, these orphaned
+      operations pile up: the connection pool exhausts, new requests
+      block waiting for a connection, and the service cascades into
+      failure. A request-scoped context ensures the Redis client
+      abandons the operation as soon as the requester is gone.
+    severity: warning
+    tags: [redis, context, timeout]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $CLIENT.Get(context.Background(), ...)
+          - pattern: $CLIENT.Set(context.Background(), ...)
+          - pattern: $CLIENT.Del(context.Background(), ...)
+          - pattern: $CLIENT.HGet(context.Background(), ...)
+          - pattern: $CLIENT.HSet(context.Background(), ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Pass the request-scoped context instead of context.Background().
+      example: |
+        // Before — cannot be cancelled on request timeout
+        val, err := rdb.Get(context.Background(), "user:123").Result()
+
+        // After — respects request lifecycle
+        val, err := rdb.Get(ctx, "user:123").Result()
+    references:
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#Client.Get
+      - https://go.dev/blog/context
+
+  # ── Cache & memory management ──────────────────────────────────
+
+  - id: go-redis-set-no-ttl
+    name: Set() called with zero TTL (no expiration)
+    description: >
+      Using Set() or SetNX() with a duration of 0, which means the
+      key never expires. Cache entries without a TTL grow unbounded
+      until Redis hits maxmemory and starts evicting unpredictably.
+    descriptions:
+      business: >
+        This code stores data in your cache permanently with no
+        expiration, which is like renting storage units and never
+        cleaning them out. Over weeks or months, memory usage grows
+        until your cache server runs out of space and either starts
+        randomly deleting important data or stops accepting new writes
+        entirely. Without this fix, you will eventually hit a
+        capacity-related outage that is hard to diagnose.
+      developer: >
+        Set() or SetNX() is called with a TTL of 0, meaning the key
+        never expires. What happens is keys accumulate indefinitely
+        until Redis hits maxmemory, at which point it either rejects
+        writes (noeviction default) or evicts unpredictably. The correct
+        pattern is to always set an explicit TTL that reflects the data's
+        freshness requirements.
+    rationale: >
+      Redis stores everything in memory. Keys without expiration
+      accumulate indefinitely. When Redis reaches maxmemory, the
+      eviction policy kicks in — and unless you have carefully
+      configured it (most teams have not), it uses noeviction by
+      default, which means writes start failing with OOM errors. Even
+      with an LRU policy, eviction is imprecise and can evict keys
+      you still need. Setting an explicit TTL ensures natural key
+      turnover, keeps memory usage predictable, and prevents stale
+      data from lingering indefinitely. Every cached value should have
+      a TTL that reflects its freshness requirements.
+    severity: warning
+    tags: [redis, cache, memory-management]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $CLIENT.Set($CTX, $KEY, $VAL, 0)
+          - pattern: $CLIENT.SetNX($CTX, $KEY, $VAL, 0)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Set an explicit TTL based on the data's freshness requirements.
+      example: |
+        // Before — key never expires, memory grows unbounded
+        rdb.Set(ctx, "user:123:profile", data, 0)
+
+        // After — expires in 15 minutes
+        rdb.Set(ctx, "user:123:profile", data, 15*time.Minute)
+    references:
+      - https://redis.io/docs/latest/commands/set/
+      - https://redis.io/docs/latest/develop/use/keyspace/#key-expiration
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#Client.Set
+
+  # ── Resource lifecycle ─────────────────────────────────────────
+
+  - id: go-redis-no-close
+    name: Redis client created without defer Close()
+    description: >
+      A Redis client is created via redis.NewClient() or
+      redis.NewClusterClient() without a subsequent defer Close().
+      The underlying connection pool leaks.
+    descriptions:
+      business: >
+        This code opens connections to your cache server but never
+        releases them, like opening tabs at a bar and never closing them
+        out. Over time the system accumulates abandoned connections until
+        it hits operating system limits and crashes with "too many open
+        files" errors. Without this fix, your service will slowly degrade
+        and eventually fail, requiring a restart to recover.
+      developer: >
+        A Redis client is created via redis.NewClient() or
+        redis.NewClusterClient() without a corresponding defer Close().
+        What happens is the internal connection pool, background health
+        check goroutines, and TCP connections all leak for the lifetime
+        of the process. The correct pattern is to always defer
+        client.Close() immediately after creation, just like sql.Open.
+    rationale: >
+      go-redis maintains an internal connection pool with background
+      goroutines for health checking and idle connection reaping.
+      Without Close(), these goroutines and TCP connections leak for
+      the lifetime of the process. In long-running services this
+      manifests as steadily growing file descriptor counts, eventual
+      "too many open files" errors, and ephemeral port exhaustion.
+      In functions that create short-lived clients (tests, migrations,
+      CLI tools), each invocation leaks an entire pool. Always defer
+      Close() immediately after creating the client, just as you
+      would with sql.Open.
+    severity: error
+    tags: [redis, resource-leak, connection-pool]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: redis.NewClient(...)
+              - pattern: redis.NewClusterClient(...)
+          - pattern-not-inside: |
+              $CLIENT := $CREATE(...)
+              ...
+              defer $CLIENT.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add defer Close() immediately after creating the Redis client.
+      example: |
+        // Before — connection pool leaks
+        rdb := redis.NewClient(&redis.Options{
+            Addr: "localhost:6379",
+        })
+        // ... rdb.Close() never called
+
+        // After — pool cleaned up on exit
+        rdb := redis.NewClient(&redis.Options{
+            Addr: "localhost:6379",
+        })
+        defer rdb.Close()
+    references:
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#Client.Close
+      - https://redis.uptrace.dev/guide/go-redis.html#connecting-to-redis-server
+
+  # ── Error handling ─────────────────────────────────────────────
+
+  - id: go-redis-err-not-checked
+    name: Redis command result accessed without error check
+    description: >
+      Calling .Val() on a Redis command result instead of .Result().
+      Val() silently returns the zero value on error, hiding network
+      failures, WRONGTYPE errors, and nil replies.
+    descriptions:
+      business: >
+        This code silently ignores errors from your cache, which means
+        network failures and data problems are hidden instead of
+        reported. Think of it like a cashier who rings up "$0.00"
+        whenever the barcode scanner fails instead of asking for help.
+        Without this fix, your application serves incorrect or empty data
+        to users during outages with no indication anything is wrong.
+      developer: >
+        .Val() is called on a Redis command result instead of .Result().
+        What happens is Val() returns the zero value on any error --
+        network blips, WRONGTYPE errors, and missing keys are all
+        silently swallowed. The correct pattern is to always use
+        .Result() to get both the value and error, handling redis.Nil
+        explicitly for cache misses.
+    rationale: >
+      Every go-redis command returns a *Cmd object with two accessors:
+      Val() returns only the value (zero value on error), and Result()
+      returns (value, error). Using Val() is equivalent to discarding
+      the error from any other Go function — it violates Go's explicit
+      error handling contract. A network blip returns an empty string
+      instead of an error. A WRONGTYPE error (e.g., GET on a hash key)
+      returns zero instead of surfacing the schema mismatch. A key
+      that does not exist returns the zero value indistinguishable
+      from a key that exists with an empty value. Always use Result()
+      and check the error, handling redis.Nil explicitly when needed.
+    severity: warning
+    tags: [redis, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $CLIENT.Get($CTX, $KEY).Val()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use .Result() instead of .Val() and check the returned error.
+      example: |
+        // Before — error silently swallowed
+        val := rdb.Get(ctx, "user:123:name").Val()
+        // val is "" on network error, WRONGTYPE, AND missing key
+
+        // After — errors handled explicitly
+        val, err := rdb.Get(ctx, "user:123:name").Result()
+        if errors.Is(err, redis.Nil) {
+            // key does not exist — handle cache miss
+        } else if err != nil {
+            return fmt.Errorf("redis get: %w", err)
+        }
+    references:
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#StringCmd.Result
+      - https://redis.uptrace.dev/guide/go-redis.html#executing-commands
+
+  # ── Pipeline correctness ───────────────────────────────────────
+
+  - id: go-redis-pipeline-not-exec
+    name: Redis pipeline created but Exec() not called
+    description: >
+      A pipeline is created via Pipeline() or TxPipeline() but
+      Exec() is never called. Commands are buffered in memory but
+      never sent to Redis.
+    descriptions:
+      business: >
+        This code queues up database operations but never actually sends
+        them, like writing a stack of letters and never putting them in
+        the mailbox. Data that appears to be saved is silently lost with
+        no error message. Without this fix, your application believes it
+        is storing data successfully, but nothing is actually persisted
+        -- leading to silent data loss that may not be discovered for
+        days.
+      developer: >
+        A Redis pipeline is created via Pipeline() or TxPipeline() but
+        Exec() is never called. What happens is all commands are buffered
+        locally in memory and then garbage collected without ever being
+        sent to Redis -- no error, no panic, just silent data loss. The
+        correct pattern is to always call pipe.Exec(ctx) after queueing
+        commands and check the returned error.
+    rationale: >
+      Pipelines batch multiple commands into a single network round
+      trip. Commands added to a pipeline are only buffered locally —
+      they are not sent to Redis until Exec() is called. Without
+      Exec(), the pipeline object is garbage collected and every
+      command silently vanishes. This is a correctness bug that is
+      extremely hard to catch in testing because there is no error
+      and no panic — the commands simply never execute. Writes appear
+      to succeed but data is never persisted. Reads return zero
+      values that look like cache misses.
+    severity: error
+    tags: [redis, pipeline, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: $CLIENT.Pipeline()
+              - pattern-not-inside: |
+                  $PIPE := $CLIENT.Pipeline()
+                  ...
+                  $PIPE.Exec(...)
+          - patterns:
+              - pattern: $CLIENT.TxPipeline()
+              - pattern-not-inside: |
+                  $PIPE := $CLIENT.TxPipeline()
+                  ...
+                  $PIPE.Exec(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Call Exec() on the pipeline to send buffered commands to Redis.
+      example: |
+        // Before — commands buffered but never sent
+        pipe := rdb.Pipeline()
+        pipe.Set(ctx, "key1", "val1", time.Hour)
+        pipe.Set(ctx, "key2", "val2", time.Hour)
+        // pipe is garbage collected, commands lost
+
+        // After — commands sent as a batch
+        pipe := rdb.Pipeline()
+        pipe.Set(ctx, "key1", "val1", time.Hour)
+        pipe.Set(ctx, "key2", "val2", time.Hour)
+        _, err := pipe.Exec(ctx)
+        if err != nil {
+            return fmt.Errorf("redis pipeline: %w", err)
+        }
+    references:
+      - https://redis.uptrace.dev/guide/go-redis-pipelines.html
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#Client.Pipeline
+
+  # ── Distributed locking ───────────────────────────────────────
+
+  - id: go-redis-lock-no-ttl
+    name: SetNX used for locking without TTL
+    description: >
+      Using SetNX() with a TTL of 0 to implement a distributed lock.
+      If the lock holder crashes or hangs, the lock is held forever,
+      causing a distributed deadlock.
+    descriptions:
+      business: >
+        This code creates a lock that never expires, so if the process
+        holding it crashes, that resource is locked forever. Think of it
+        like a bathroom with a lock that has no emergency override -- if
+        someone passes out inside, nobody else can ever get in. Without
+        this fix, a single crash can permanently block a business-critical
+        operation, requiring manual intervention (often at 3 AM) to
+        resolve.
+      developer: >
+        SetNX() is being used for distributed locking with a TTL of 0,
+        meaning the lock never auto-expires. What happens is if the lock
+        holder crashes, gets OOM-killed, or loses connectivity, the lock
+        key persists forever and every other process waiting for it blocks
+        indefinitely. The correct pattern is to always set a TTL that
+        exceeds your expected critical section duration but is short
+        enough to auto-recover within your SLA.
+    rationale: >
+      SetNX (SET if Not eXists) is the primitive for distributed
+      locking in Redis. The TTL parameter is not optional — it is the
+      safety net. If the process holding the lock crashes, gets OOM
+      killed, or loses network connectivity, the lock key persists
+      forever with no TTL. Every other process waiting for that lock
+      blocks indefinitely. This is a distributed deadlock that
+      requires manual intervention (DEL the key) to resolve, often
+      at 3 AM. Always set a TTL that exceeds your expected critical
+      section duration but is short enough to auto-recover from
+      crashes within your SLA.
+    severity: warning
+    tags: [redis, distributed-lock, deadlock]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: $CLIENT.SetNX($CTX, $KEY, $VAL, 0)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Set a TTL on the lock key to prevent deadlocks on holder failure.
+      example: |
+        // Before — lock held forever if holder crashes
+        ok, err := rdb.SetNX(ctx, "lock:order:123", myID, 0).Result()
+
+        // After — lock auto-expires after 30 seconds
+        ok, err := rdb.SetNX(ctx, "lock:order:123", myID, 30*time.Second).Result()
+        if err != nil { return err }
+        if !ok {
+            return ErrLockHeld
+        }
+        defer rdb.Del(ctx, "lock:order:123")
+    references:
+      - https://redis.io/docs/latest/develop/use/patterns/distributed-locks/
+      - https://pkg.go.dev/github.com/redis/go-redis/v9#Client.SetNX
+
+  # ── Configuration ──────────────────────────────────────────────
+
+  - id: go-redis-hardcoded-addr
+    name: Hardcoded Redis address
+    description: >
+      Redis connection address specified as a string literal (e.g.,
+      "localhost:6379") in the Options struct. The address should come
+      from configuration — environment variables, config files, or
+      service discovery.
+    descriptions:
+      business: >
+        This code has a server address baked directly into the source
+        code, which means deploying to a different environment (staging,
+        production, disaster recovery) requires a code change and
+        redeployment. Think of it like printing your home address on
+        every piece of mail instead of using a return address label you
+        can swap out. Without this fix, environment migrations and
+        failovers require engineering effort instead of a configuration
+        change.
+      developer: >
+        A Redis connection address is hardcoded as a string literal in
+        the Options struct. What happens is the binary only works in the
+        environment matching that address -- deploying to staging,
+        production, or a failover instance requires a code change. The
+        correct pattern is to read the address from an environment
+        variable, config struct, or service discovery so the same binary
+        works unchanged in every environment.
+    rationale: >
+      Hardcoded addresses violate the twelve-factor app principle of
+      strict separation between config and code. A hardcoded
+      "localhost:6379" works in development but fails in staging,
+      production, and CI — requiring code changes to deploy to
+      different environments. This also makes it impossible to
+      failover to a replica or switch to a different Redis instance
+      without recompiling. Use os.Getenv, a config struct populated
+      from environment, or a service discovery mechanism so the same
+      binary runs unchanged in every environment.
+    severity: info
+    tags: [redis, configuration, twelve-factor]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              redis.NewClient(&redis.Options{
+                  ...,
+                  Addr: "...",
+                  ...,
+              })
+          - pattern-not-inside: |
+              func Test$F(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Read the Redis address from an environment variable or config struct.
+      example: |
+        // Before — hardcoded, only works in dev
+        rdb := redis.NewClient(&redis.Options{
+            Addr: "localhost:6379",
+        })
+
+        // After — config-driven, works in any environment
+        rdb := redis.NewClient(&redis.Options{
+            Addr: cfg.RedisAddr, // from env, config file, or service discovery
+        })
+    references:
+      - https://12factor.net/config
+      - https://redis.uptrace.dev/guide/go-redis.html#connecting-to-redis-server

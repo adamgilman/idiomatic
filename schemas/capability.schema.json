@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/adamgilman/idiomatic/main/schemas/capability.schema.json",
+  "title": "Idiomatic Capability",
+  "description": "A capability is a YAML wrapper around an external CLI tool. It declares how rules supply inputs, how to invoke the tool, and how to project the tool's output into structured findings. The shape is Kubernetes-style: a stable apiVersion + kind, identity in metadata, behavior in spec.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "description": "Schema version. Bumped only on structural breaks (renames, removals, semantic changes). Backwards-compatible additions do not require an apiVersion bump.",
+      "const": "capabilities.idiomatic.dev/v1alpha1"
+    },
+    "kind": {
+      "description": "Discriminator. Always 'Capability' for this schema.",
+      "const": "Capability"
+    },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "spec": { "$ref": "#/$defs/spec" }
+  },
+
+  "$defs": {
+
+    "metadata": {
+      "type": "object",
+      "title": "Capability metadata",
+      "description": "Identity of this capability. Name is the routing key (rules reference it via detector.capability). Version is the semver of THIS CAPABILITY (not the underlying CLI tool); rules can pin to a major or range via detector.version.",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique identifier within a registry. Lowercase, hyphenated, alphanumeric.",
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "examples": ["semgrep", "golangci-lint", "file-exists"]
+        },
+        "version": {
+          "type": "string",
+          "description": "Semver version of this capability. Bump on every behavioral change. Patch = bug fix; minor = backwards-compatible additions; major = breaking changes (renamed inputs, changed signal projection, changed match strategy).",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "examples": ["1.0.0", "1.2.3", "2.0.0-rc.1"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable one-liner."
+        }
+      }
+    },
+
+    "spec": {
+      "type": "object",
+      "title": "Capability behavior",
+      "description": "How the tool runs and how its output becomes findings. Adding a new behavioral field? Put it here. Adding a new identity field? Put it under metadata.",
+      "required": ["requires", "run", "signal"],
+      "additionalProperties": false,
+      "properties": {
+        "applies_to_files": { "$ref": "#/$defs/appliesToFiles" },
+        "requires": { "$ref": "#/$defs/requires" },
+        "inputs": { "$ref": "#/$defs/inputs" },
+        "run": { "$ref": "#/$defs/run" },
+        "signal": { "$ref": "#/$defs/signal" }
+      }
+    },
+
+    "appliesToFiles": {
+      "type": "object",
+      "title": "File router",
+      "description": "Tells the file router which files this capability cares about. Used by both the scan path (filter req.Files before invoking the tool) and the claudehook path (decide which capabilities to dispatch a changed file to).",
+      "additionalProperties": false,
+      "properties": {
+        "extensions": {
+          "type": "array",
+          "description": "Exact suffix match. Each entry should include the leading dot. Omit to receive all files.",
+          "items": { "type": "string", "pattern": "^\\..+$" },
+          "examples": [[".go"], [".ts", ".tsx"]]
+        }
+      }
+    },
+
+    "requires": {
+      "type": "object",
+      "title": "Tool requirements",
+      "description": "Declares the binary the capability wraps and any optional pre-invocation discovery / preflight checks.",
+      "required": ["binary"],
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "string",
+          "description": "Name of the executable to invoke. Looked up via exec.LookPath unless `discover` is set.",
+          "examples": ["semgrep", "git", "stat"]
+        },
+        "install": {
+          "type": "string",
+          "description": "Human-readable install hint, surfaced when the binary is not found.",
+          "examples": ["uv tool install semgrep", "brew install gitleaks"]
+        },
+        "discover": { "$ref": "#/$defs/discoverBinary" },
+        "discover_files": {
+          "type": "array",
+          "description": "Optional walk-up file lookups exposed to templates as {{ .Discovered.<var> }} and to argv as {discovered.<var>}. Used by capabilities that need context files (e.g. eslint's tsconfig.json) discovered at runtime.",
+          "items": { "$ref": "#/$defs/discoverFile" }
+        },
+        "precheck": {
+          "type": "array",
+          "description": "Preflight conditions evaluated before invocation. The first failing precheck aborts with its error message. Used by capabilities that need to verify plugins or other dependencies are installed.",
+          "items": { "$ref": "#/$defs/precheck" }
+        }
+      }
+    },
+
+    "discoverBinary": {
+      "type": "object",
+      "title": "Walk-up binary discovery",
+      "description": "Overrides the default exec.LookPath behavior. The runtime walks parent directories looking for a relative path; the directory containing the match becomes {project_root}.",
+      "required": ["strategy", "relative"],
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["walk_up_from_cwd"],
+          "description": "Currently only walk_up_from_cwd is implemented."
+        },
+        "relative": {
+          "type": "string",
+          "description": "Path under each ancestor directory to test for.",
+          "examples": ["node_modules/.bin/eslint"]
+        },
+        "fallback_to_path": {
+          "type": "boolean",
+          "description": "If walk-up fails, fall back to exec.LookPath(binary).",
+          "default": false
+        }
+      }
+    },
+
+    "discoverFile": {
+      "type": "object",
+      "title": "Walk-up file discovery",
+      "description": "One file lookup exposed as a template variable.",
+      "required": ["var", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "var": {
+          "type": "string",
+          "description": "Variable name. Templates reference it as {{ .Discovered.<var> }} and argv references it as {discovered.<var>}.",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "examples": ["tsconfig"]
+        },
+        "name": {
+          "type": "string",
+          "description": "File name to look for at each ancestor directory.",
+          "examples": ["tsconfig.json", "package.json"]
+        },
+        "walk_up_from": {
+          "type": "string",
+          "enum": ["cwd"],
+          "default": "cwd",
+          "description": "Where the walk starts. Currently only 'cwd'."
+        },
+        "optional": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, the variable defaults to '' when no match is found instead of aborting with an error."
+        }
+      }
+    },
+
+    "precheck": {
+      "type": "object",
+      "title": "Preflight check",
+      "description": "One preflight condition. Currently only kind: file_exists is implemented.",
+      "required": ["kind", "path", "error_message"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["file_exists"]
+        },
+        "path": {
+          "type": "string",
+          "description": "File path to check. Resolved against {project_root} and {{ .Value }} when for_each_unique_input is set."
+        },
+        "for_each_unique_input": {
+          "type": "string",
+          "description": "Names a rule input field. The precheck runs once per unique non-empty value seen across all matching rules; templates in path and error_message can reference {{ .Value }}.",
+          "examples": ["plugin"]
+        },
+        "skip_values": {
+          "type": "array",
+          "description": "Values that should be ignored by for_each_unique_input.",
+          "items": { "type": "string" }
+        },
+        "error_message": {
+          "type": "string",
+          "description": "User-facing error if the check fails. Templated against the same view as path."
+        }
+      }
+    },
+
+    "inputs": {
+      "type": "object",
+      "title": "Per-rule input contract",
+      "description": "Declares the slots a rule must (or may) fill. Each key is a slot name; the value declares its type and required/optional status. Rules supply these values via detector.config.",
+      "patternProperties": {
+        "^[a-zA-Z_][a-zA-Z0-9_-]*$": { "$ref": "#/$defs/inputField" }
+      },
+      "additionalProperties": false
+    },
+
+    "inputField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "list", "map", "any"],
+          "description": "string and list/map are checked at load time. 'any' accepts any YAML value (used when the rule supplies an opaque structure that the capability template splats through)."
+        },
+        "required": { "type": "boolean", "default": false },
+        "description": { "type": "string" }
+      }
+    },
+
+    "run": {
+      "type": "object",
+      "title": "Tool invocation",
+      "description": "How to invoke the tool. The dispatch is determined by `per`: batch (one invocation for all rules), rule (one per rule), or file (one per target file).",
+      "required": ["argv"],
+      "additionalProperties": false,
+      "properties": {
+        "per": {
+          "type": "string",
+          "enum": ["batch", "rule", "file"],
+          "default": "batch",
+          "description": "Invocation strategy. batch = one exec for all rules; rule = one exec per rule; file = one exec per target file."
+        },
+        "config_file": { "$ref": "#/$defs/configFile" },
+        "argv": {
+          "type": "array",
+          "description": "Argv passed to the binary. Each entry can be a literal, a Go template (rendered with sprig), or one of the well-known placeholders: {config_file}, {report_path}, {project_root}, {pid}, {discovered.<var>}, {files} (expands to multiple entries).",
+          "items": { "type": "string" }
+        },
+        "rule_argv_field": {
+          "type": "string",
+          "description": "(per: rule only) Names a rule input field whose list value is appended to argv at execution time. Used by capabilities like git where each rule supplies its own subcommand."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Go duration string (e.g. 60s, 2m). Default 60s.",
+          "pattern": "^\\d+(ns|us|µs|ms|s|m|h)$",
+          "examples": ["30s", "2m"]
+        },
+        "ok_exit": {
+          "type": "array",
+          "description": "Non-zero exit codes that should be treated as success (most linters return 1 when they find issues). Exit code 0 is always treated as success.",
+          "items": { "type": "integer", "minimum": 0 },
+          "examples": [[1], [0, 1, 128]]
+        },
+        "output": {
+          "type": "string",
+          "enum": ["stdout", "report_file"],
+          "default": "stdout",
+          "description": "Where to read tool output from. report_file allocates a temp file, passes it via {report_path}, and reads it back after the tool exits."
+        },
+        "report_path_pattern": {
+          "type": "string",
+          "description": "Required when output=report_file. Filename pattern for the temp report file (uses os.CreateTemp semantics)."
+        },
+        "files_as_dirs": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, target files are translated into a deduplicated list of '<dir>/...' entries. Used by tools (golangci-lint) that take directories instead of files."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "output": { "const": "report_file" } }, "required": ["output"] },
+          "then": { "required": ["report_path_pattern"] }
+        }
+      ]
+    },
+
+    "configFile": {
+      "type": "object",
+      "title": "Generated config file",
+      "description": "Describes a temp file generated from the matching rules and referenced by argv via the {config_file} placeholder.",
+      "required": ["path", "template"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Where to write the file. {tmp}/foo.json uses os.CreateTemp; {project_root}/foo.json writes directly to the discovered project root. Both are cleaned up by the runtime after the invocation.",
+          "examples": ["{tmp}/idio-semgrep-rules.yaml", "{project_root}/.idio-eslint-config-{pid}.mjs"]
+        },
+        "template": {
+          "type": "string",
+          "description": "Go text/template body with sprig helpers (toYaml, toJson, quote, indent, nindent, default, list, append, range, if, ...). The view exposes .Rules (the rule set), .ProjectRoot, .Discovered, .Pid."
+        }
+      }
+    },
+
+    "signal": {
+      "title": "Output projection",
+      "description": "How the tool's output becomes findings. Two shapes: list (the tool emits a list of structured findings) or scalar (the tool's output is queried per-rule by a fire_when expression).",
+      "oneOf": [
+        { "$ref": "#/$defs/signalList" },
+        { "$ref": "#/$defs/signalScalar" }
+      ]
+    },
+
+    "signalList": {
+      "type": "object",
+      "required": ["shape", "match_rule_by"],
+      "additionalProperties": false,
+      "properties": {
+        "shape": { "const": "list" },
+        "source": {
+          "type": "string",
+          "enum": ["stdout", "report_file"],
+          "default": "stdout"
+        },
+        "format": {
+          "type": "string",
+          "enum": ["json"],
+          "default": "json",
+          "description": "Currently only json is supported."
+        },
+        "list": {
+          "type": "string",
+          "description": "gjson path to the outer array. Empty string = top-level array. The .# suffix is optional."
+        },
+        "nested_list": {
+          "type": "string",
+          "description": "Optional second-level walk: select a nested array on each outer item. Each inner item becomes a finding. Use parent_fields to project outer-item fields onto each inner item."
+        },
+        "parent_fields": {
+          "type": "object",
+          "description": "Outer-item fields exposed to inner items via 'parent.<alias>' paths in signal.fields. Only used with nested_list.",
+          "additionalProperties": { "type": "string" }
+        },
+        "match_rule_by": { "$ref": "#/$defs/matchRuleBy" },
+        "fields": {
+          "type": "object",
+          "description": "Maps Finding fields (file, line, col, end_line, end_col, message, severity) to gjson paths on the inner item. Use 'parent.<alias>' to read from a projected parent field.",
+          "additionalProperties": { "type": "string" }
+        },
+        "severity_map": {
+          "type": "object",
+          "description": "Maps upstream severity strings to idiomatic severities (error|warning|info).",
+          "additionalProperties": { "type": "string", "enum": ["error", "warning", "info"] }
+        }
+      }
+    },
+
+    "signalScalar": {
+      "type": "object",
+      "required": ["shape"],
+      "additionalProperties": false,
+      "properties": {
+        "shape": { "const": "scalar" },
+        "scalar_fields": {
+          "type": "object",
+          "description": "Named projections of the scalar tool output. Each entry pulls from stdout, stderr, or exit and applies an optional transform.",
+          "additionalProperties": { "$ref": "#/$defs/scalarField" }
+        },
+        "fixed_file": {
+          "type": "string",
+          "description": "Synthetic file path emitted in findings. Supports {project} and {{ .Inputs.<field> }} substitutions."
+        }
+      }
+    },
+
+    "matchRuleBy": {
+      "type": "object",
+      "required": ["from"],
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["by_id", "by_input", "linter_contains"],
+          "default": "by_id",
+          "description": "How each item names the rule it belongs to. by_id = pack rule id equals the extracted value. by_input = extracted value matches rule.config[field]. linter_contains = first by_input, then disambiguate by substring-matching subrule_field against the entry's match_in field."
+        },
+        "from": {
+          "type": "string",
+          "description": "gjson path on the inner item that produces the routing key."
+        },
+        "transform": {
+          "type": "string",
+          "enum": ["identity", "tail_after_dot"],
+          "default": "identity",
+          "description": "tail_after_dot strips everything up to the last '.' (e.g. 'tmp.go-no-panic' -> 'go-no-panic')."
+        },
+        "field": {
+          "type": "string",
+          "description": "(by_input strategy) Rule input field to look up against the extracted value."
+        },
+        "subrule_field": {
+          "type": "string",
+          "description": "(linter_contains strategy) Rule input field carrying the sub-rule name."
+        },
+        "match_in": {
+          "type": "string",
+          "description": "(linter_contains strategy) gjson path on the inner item to substring-search for the sub-rule name."
+        }
+      }
+    },
+
+    "scalarField": {
+      "type": "object",
+      "required": ["from"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "enum": ["stdout", "stderr", "exit"]
+        },
+        "transform": {
+          "type": "string",
+          "enum": ["identity", "trim"],
+          "default": "identity"
+        }
+      }
+    }
+  }
+}

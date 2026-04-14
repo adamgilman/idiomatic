@@ -1,0 +1,445 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ts-comment-hygiene
+  name: TypeScript Comment Hygiene
+  version: 0.1.0
+  description: >
+    Comment and documentation hygiene rules for TypeScript projects.
+    Ensures exported APIs are documented, JSDoc is accurate, and
+    stale or meaningless comments don't accumulate.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-comment-hygiene.yaml
+
+rules:
+  # ── Tracking and attribution ───────────────────────────────────
+
+  - id: ts-todo-without-issue
+    name: TODO/FIXME comment without tracking reference
+    description: >
+      Flags TODO, FIXME, and HACK comments that lack a tracking reference
+      such as a parenthetical author name, issue number, or ticket link.
+      Unattributed TODOs become permanent fixtures that no one owns.
+    descriptions:
+      business: >
+        TODO comments without a ticket number or owner are promises that
+        no one tracks. They pile up silently — your codebase accumulates
+        hundreds of "TODO: fix this later" notes that never get fixed
+        because they're not in any project backlog. Meanwhile, the issues
+        they describe may be causing real bugs, performance problems, or
+        security gaps. Requiring a tracking reference ensures every TODO
+        has an owner and a path to resolution.
+      developer: >
+        A TODO, FIXME, or HACK comment was written without a tracking
+        reference. The convention is TODO(username), TODO(#123), or
+        TODO(JIRA-456) so the comment can be traced to an owner or ticket.
+        Bare TODOs without attribution are invisible to project tracking
+        tools and accumulate indefinitely. Add a parenthetical reference
+        so the item can be found, prioritized, and eventually resolved.
+    rationale: >
+      Bare TODO comments ("// TODO fix this") have no owner, no ticket,
+      and no expiration date. They accumulate in every codebase and become
+      permanent fixtures. The convention TODO(author) or TODO(#issue)
+      creates accountability: the author is responsible for either fixing
+      it or filing a ticket, and the reference makes the item discoverable
+      in project tracking. Without this discipline, TODOs are just wishful
+      comments that never get done and eventually outnumber the real
+      documentation in the codebase.
+    severity: warning
+    tags: [comment-quality, tracking, maintainability]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "//\\s*(TODO|FIXME|HACK)(?!\\s*\\()"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Add a tracking reference to the TODO comment — author name, issue number, or ticket link.
+      example: |
+        // Before — no owner, no tracking
+        // TODO fix the race condition in processQueue()
+        // FIXME handle the error properly
+        // HACK this works but is brittle
+
+        // After — attributed, trackable
+        // TODO(alice) fix the race condition in processQueue()
+        // FIXME(#1234) handle the error properly
+        // HACK(PROJ-567) this works but is brittle — will refactor in Q3
+    references:
+      - https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html
+      - https://google.github.io/styleguide/tsguide.html#comments-documentation
+
+  # ── Lint suppression hygiene ───────────────────────────────────
+
+  - id: ts-eslint-disable-without-reason
+    name: eslint-disable comment without explanation
+    description: >
+      Flags eslint-disable and eslint-disable-next-line comments that
+      suppress linter warnings without providing a reason after the
+      double-dash separator. Every lint suppression should explain why
+      the rule does not apply in this specific case.
+    descriptions:
+      business: >
+        Lint suppressions without explanations are a maintenance hazard.
+        When a developer encounters eslint-disable with no reason, they
+        cannot tell whether the suppression was intentional or a shortcut
+        to silence a warning the developer didn't want to fix. Over time,
+        unexplained suppressions accumulate and mask real issues — your
+        linter configuration becomes security theater that catches nothing
+        in the areas where it's most needed.
+      developer: >
+        An eslint-disable directive was used without a reason comment after
+        the -- separator. ESLint supports inline descriptions in the format
+        "eslint-disable-next-line rule-name -- reason for suppression".
+        Without a reason, the suppression is opaque to future maintainers
+        who cannot tell if the suppression is still valid after code changes.
+        Always include a brief explanation after --.
+    rationale: >
+      eslint-disable without a reason is the TypeScript equivalent of a
+      bare "except Exception" — it silences a warning without documenting
+      why. When code changes later, no one knows whether the suppression
+      is still valid or was just a shortcut. ESLint's -- comment syntax
+      exists specifically for this purpose. Requiring a reason forces the
+      author to justify the suppression at the time they write it, and
+      gives future reviewers enough context to evaluate whether it's
+      still needed or should be removed.
+    severity: warning
+    tags: [lint-hygiene, maintainability, conventions]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "//\\s*eslint-disable(?:-next-line)?(?:\\s+[\\w@/-]+(?:,\\s*[\\w@/-]+)*)?\\s*$"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Add a reason to the eslint-disable comment using the -- separator.
+      example: |
+        // Before — why is this suppressed?
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const config = legacy.getConfig();
+
+        // After — reason documented for future reviewers
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy API returns untyped config, migration tracked in #4521
+        const config = legacy.getConfig();
+    references:
+      - https://eslint.org/docs/latest/use/configure/rules#using-configuration-comments-1
+      - https://typescript-eslint.io/linting/troubleshooting/#eslint-disable
+
+  - id: ts-ts-ignore-prefer-expect-error
+    name: Prefer @ts-expect-error over @ts-ignore
+    description: >
+      Flags @ts-ignore comments which permanently silence TypeScript
+      errors. Use @ts-expect-error instead, which fails when the
+      underlying error is fixed — preventing stale suppressions.
+    descriptions:
+      business: >
+        @ts-ignore is a permanent silencer — once added, it never tells
+        you when the problem it was masking gets fixed. This means your
+        team pays the cost of a workaround forever, even after the root
+        cause is resolved. @ts-expect-error is the safer alternative: it
+        works the same way but raises a new error when the suppressed
+        issue is fixed, prompting the developer to clean up the workaround.
+        This keeps your codebase from accumulating invisible technical debt.
+      developer: >
+        A @ts-ignore directive was used instead of @ts-expect-error. The
+        key difference is that @ts-expect-error will report an error if
+        the line it annotates has no type error — meaning you'll be
+        notified when the underlying issue is fixed and the suppression
+        can be removed. @ts-ignore silently stays forever. TypeScript 3.9+
+        supports @ts-expect-error as the preferred suppression mechanism.
+    rationale: >
+      @ts-ignore permanently suppresses all TypeScript errors on the next
+      line with no feedback mechanism. If the underlying error is later
+      fixed (by a dependency update, type fix, or refactor), the @ts-ignore
+      stays silently — masking potential new errors on that line.
+      @ts-expect-error is the strict alternative: it suppresses the current
+      error but reports a new error if there's nothing to suppress. This
+      creates a self-cleaning mechanism where suppressions don't outlive
+      the problems they were created for.
+    severity: warning
+    tags: [type-safety, lint-hygiene, conventions]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "//\\s*@ts-ignore"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Replace @ts-ignore with @ts-expect-error and add a reason.
+      example: |
+        // Before — permanent, silent suppression
+        // @ts-ignore
+        const value = untypedLibrary.doSomething();
+
+        // After — self-cleaning suppression with reason
+        // @ts-expect-error -- untypedLibrary has no type definitions, tracked in #891
+        const value = untypedLibrary.doSomething();
+    references:
+      - https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-9.html#-ts-expect-error-comments
+      - https://typescript-eslint.io/rules/prefer-ts-expect-error/
+
+  - id: ts-ts-expect-error-without-reason
+    name: "@ts-expect-error without explanation"
+    description: >
+      Flags @ts-expect-error comments that suppress TypeScript errors
+      without providing a reason. Even the correct suppression directive
+      needs an explanation so future maintainers understand the context.
+    descriptions:
+      business: >
+        Even when the right suppression tool is used, a suppression without
+        an explanation is a black box. Future developers see that a type
+        error was intentionally silenced but have no idea why. Was it a
+        library bug? A known limitation? A temporary workaround? Without
+        context, developers are afraid to touch the code, and workarounds
+        survive long after the original problem is fixed. A brief reason
+        eliminates this ambiguity.
+      developer: >
+        A @ts-expect-error directive was used without a reason after the
+        double-dash separator. While @ts-expect-error is the correct
+        suppression mechanism (it self-cleans), it still needs context.
+        Without a reason, reviewers and future maintainers cannot evaluate
+        whether the suppression is still necessary or what conditions would
+        allow its removal. Always add "-- reason" after the directive.
+    rationale: >
+      @ts-expect-error without a reason is better than @ts-ignore (it
+      self-cleans) but still creates a maintenance burden. The developer
+      who added it knows why the type error exists, but that knowledge is
+      lost when they leave the team. A brief reason like "-- library types
+      are incomplete, see #123" gives future maintainers enough context to
+      evaluate the suppression and remove it when appropriate. The -- syntax
+      is the standard separator for inline explanations in TypeScript
+      suppression comments.
+    severity: warning
+    tags: [type-safety, lint-hygiene, documentation]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "//\\s*@ts-expect-error\\s*$"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Add a reason to the @ts-expect-error comment using the -- separator.
+      example: |
+        // Before — suppression without context
+        // @ts-expect-error
+        const result = legacyLib.process(data);
+
+        // After — reason documented
+        // @ts-expect-error -- legacyLib types don't include process(), fix pending in #2341
+        const result = legacyLib.process(data);
+    references:
+      - https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-9.html#-ts-expect-error-comments
+      - https://typescript-eslint.io/rules/ban-ts-comment/
+
+  # ── Documentation quality ──────────────────────────────────────
+
+  - id: ts-deprecated-without-alternative
+    name: "@deprecated JSDoc tag without migration guidance"
+    description: >
+      Flags @deprecated JSDoc tags that mark a symbol as deprecated but
+      do not tell the caller what to use instead. A deprecation without
+      a migration path is not actionable.
+    descriptions:
+      business: >
+        Marking something as deprecated without saying what to use instead
+        leaves your API consumers stranded. They know the old function is
+        going away, but not where to go. This creates support tickets,
+        Slack messages, and confusion that slows down every team depending
+        on your package. A single sentence — "Use X instead" — eliminates
+        an entire class of questions and makes the migration self-service.
+      developer: >
+        A @deprecated JSDoc tag was added without specifying an alternative.
+        TypeScript and IDEs (VS Code, WebStorm) render @deprecated tags
+        with strikethrough text and hover warnings, but if the tag doesn't
+        say what to use instead, the developer must search the codebase
+        to find the replacement. Always include migration guidance in the
+        @deprecated description: "Use X instead" or "See Y for the
+        replacement API."
+    rationale: >
+      TypeScript tooling recognizes the @deprecated JSDoc tag and displays
+      visual warnings (strikethrough, hover hints) in IDEs. But a warning
+      without guidance is noise — it tells the caller to stop using
+      something without telling them what to use instead. The result is
+      frustrated developers who either ignore the deprecation (because
+      they don't know the alternative) or spend time searching for it.
+      Including "Use X instead" in the deprecation comment makes the
+      migration self-service and dramatically reduces the support burden.
+    severity: warning
+    tags: [documentation, api-lifecycle, deprecation]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "@deprecated(?!.*(?i)(use |see |replace|instead|migrate))"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Add migration guidance to the @deprecated tag — specify what to use instead.
+      example: |
+        // Before — deprecated but no migration path
+        /**
+         * @deprecated Do not use.
+         */
+        function fetchUser(id: string): Promise<User> { ... }
+
+        // After — actionable deprecation
+        /**
+         * @deprecated Use {@link getUserById} instead, which returns a
+         * validated UserResponse and supports caching.
+         */
+        function fetchUser(id: string): Promise<User> { ... }
+    references:
+      - https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#deprecated
+      - https://jsdoc.app/tags-deprecated
+
+  # ── Code cleanliness ───────────────────────────────────────────
+
+  - id: ts-commented-out-import
+    name: Commented-out import statement
+    description: >
+      Flags import statements that have been commented out instead of
+      deleted. Commented-out imports are dead code that clutters the
+      file header and signals incomplete refactoring.
+    descriptions:
+      business: >
+        Commented-out code is clutter that makes your codebase harder to
+        read and maintain. Every developer who opens the file must mentally
+        skip over dead imports, wondering whether they're needed or were
+        left by accident. Over time, commented-out imports accumulate and
+        make the file header — the first thing a developer sees — look
+        messy and unmaintained. Version control already preserves history;
+        there is no need to keep dead code in comments.
+      developer: >
+        An import statement was commented out instead of deleted. This is
+        a common pattern during refactoring or debugging, but the commented
+        import should be removed before merging. Version control (git)
+        preserves the full history — if the import is needed later, it can
+        be restored from the commit history. Leaving it commented out adds
+        noise to the file and signals incomplete work.
+    rationale: >
+      Commented-out imports are a form of dead code. They serve no
+      functional purpose and indicate one of two things: the developer
+      was debugging and forgot to clean up, or the developer was unsure
+      whether the import would be needed later. In both cases, the right
+      action is to delete the line. Git preserves history — any deleted
+      import can be recovered from a previous commit. Keeping it as a
+      comment adds visual noise and makes the import section harder to
+      scan at a glance.
+    severity: warning
+    tags: [dead-code, cleanliness, imports]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "^\\s*//\\s*import\\s"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Delete the commented-out import. Use version control to recover it if needed later.
+      example: |
+        // Before — dead import cluttering the file header
+        import { UserService } from './services/user';
+        // import { AdminService } from './services/admin';
+        // import { Logger } from '../utils/logger';
+        import { Database } from './database';
+
+        // After — clean import section
+        import { UserService } from './services/user';
+        import { Database } from './database';
+    references:
+      - https://google.github.io/styleguide/tsguide.html#comments-documentation
+      - https://typescript-eslint.io/rules/no-unused-vars/
+
+  - id: ts-empty-comment
+    name: Empty or whitespace-only comment
+    description: >
+      Flags comments that contain only whitespace or are completely empty.
+      Empty comments add visual noise without providing any information
+      and typically indicate leftover scaffolding or incomplete documentation.
+    descriptions:
+      business: >
+        Empty comments are noise that makes your code harder to read.
+        Every blank comment forces a developer to pause and wonder if
+        something should be there — was it a placeholder for documentation
+        that was never written, or an accidental leftover from a template?
+        This micro-friction adds up across a large codebase and makes the
+        code feel unfinished and poorly maintained.
+      developer: >
+        A comment was found that contains only whitespace or is completely
+        empty (just "//"). This typically happens when a developer starts
+        writing a comment and gets distracted, or when a code template
+        includes placeholder comments that are never filled in. Empty
+        comments should be either filled with useful information or deleted
+        entirely. They provide no value and add visual clutter.
+    rationale: >
+      Empty comments ("//", "// ", or "/* */") serve no documentation
+      purpose and add visual noise to the code. They often arise from
+      templates, scaffolding tools, or interrupted documentation attempts.
+      In code review, they signal incomplete work. In a codebase, they
+      accumulate as noise that developers learn to ignore — which means
+      they also learn to ignore real comments nearby. Delete empty comments
+      or fill them with useful content.
+    severity: warning
+    tags: [dead-code, cleanliness, documentation]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-regex: "^\\s*//\\s*$"
+    applies_to:
+      - "**/*.ts"
+      - "**/*.tsx"
+    excludes:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    fix:
+      message: Delete the empty comment or fill it with useful documentation.
+      example: |
+        // Before — empty comments add noise
+        //
+        function processOrder(order: Order): Result {
+          //
+          const validated = validate(order);
+          //
+          return execute(validated);
+        }
+
+        // After — clean code, no empty comments
+        function processOrder(order: Order): Result {
+          const validated = validate(order);
+          return execute(validated);
+        }
+    references:
+      - https://google.github.io/styleguide/tsguide.html#comments-documentation
+      - https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html

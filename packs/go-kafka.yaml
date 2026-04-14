@@ -1,0 +1,661 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-kafka
+  name: Go Kafka
+  version: 0.1.0
+  description: >
+    Principal-level Apache Kafka rules for Go services. Catches offset
+    commit ordering bugs, missing dead-letter handling, producer
+    reliability gaps, and consumer anti-patterns that cause message
+    loss or duplicate processing in production.
+  descriptions:
+    business: >
+      Your team invested in Kafka so you can process events reliably at
+      scale -- orders, payments, notifications, and data pipelines. This
+      pack catches mistakes that silently lose messages, leak connections,
+      or prevent clean shutdowns, the kind of bugs that mean lost
+      transactions and data you can never recover.
+    developer: >
+      Kafka gives you durable, ordered event streams, but the Go client
+      APIs (sarama, kafka-go) have subtle footguns around offset commit
+      ordering, resource lifecycle, and error handling. These rules enforce
+      process-then-commit ordering, proper Close() calls, DLQ patterns,
+      and context propagation for graceful shutdown.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-kafka.yaml
+  tags:
+    language: go
+    vendor: kafka
+    category: messaging
+    architecture: [services, workers, pipelines]
+
+rules:
+  # ── Offset management ──────────────────────────────────────────
+
+  - id: go-kafka-commit-before-process-sarama
+    name: Sarama offset committed before processing
+    description: >
+      Flags sarama ConsumerGroupHandler code where MarkMessage is called
+      before the message has been fully processed.
+    descriptions:
+      business: >
+        This code marks a message as "done" before it actually finishes
+        processing it. Think of it like signing for a package before
+        checking if it is damaged -- if anything goes wrong during
+        processing, the message is permanently lost with no way to retry.
+        For payment or order pipelines, this means silently dropped
+        transactions.
+      developer: >
+        MarkMessage was called before processing completes. If the consumer
+        crashes mid-process, the offset is already committed and the message
+        is permanently skipped. The correct pattern is always
+        process-then-mark to maintain at-least-once delivery guarantees.
+    rationale: >
+      MarkMessage tells the consumer group to commit this offset on the
+      next auto-commit cycle. If you mark before processing and the consumer
+      crashes mid-process, the message is permanently lost — the next consumer
+      picks up after the committed offset. This is the single most common
+      source of silent message loss in Kafka consumers. The correct pattern
+      is always process-then-mark.
+    severity: error
+    tags: [kafka, offset-management, message-loss, sarama]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          $SESSION.MarkMessage($MSG, ...)
+          ...
+          $PROCESS($MSG)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move MarkMessage after message processing is complete.
+      example: |
+        // Before — message lost if crash occurs during Process
+        session.MarkMessage(msg, "")
+        processMessage(msg)
+
+        // After — offset only committed after successful processing
+        processMessage(msg)
+        session.MarkMessage(msg, "")
+    references:
+      - https://pkg.go.dev/github.com/IBM/sarama#ConsumerGroupSession.MarkMessage
+
+  - id: go-kafka-commit-before-process-kafkago
+    name: kafka-go offset committed before processing
+    description: >
+      Flags kafka-go code where CommitMessages is called before the
+      message has been fully processed.
+    descriptions:
+      business: >
+        This code tells Kafka a message was processed before it actually
+        was. Think of it like checking off a task on your list before doing
+        it -- if the service restarts, that task is gone forever. In
+        business terms, this means lost orders, missed notifications, or
+        dropped data with no audit trail.
+      developer: >
+        CommitMessages writes the offset to the broker before processing
+        finishes. If the consumer crashes between commit and processing,
+        the message is gone -- the broker considers it consumed. Always
+        process first, commit second to preserve at-least-once guarantees.
+    rationale: >
+      CommitMessages writes the offset to the Kafka broker. If you commit
+      before processing completes and the consumer crashes, the message
+      is gone — the broker considers it consumed. Always process first,
+      commit second. This is the fundamental at-least-once guarantee.
+    severity: error
+    tags: [kafka, offset-management, message-loss, kafka-go]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          $READER.CommitMessages($CTX, $MSG)
+          ...
+          $PROCESS($MSG)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move CommitMessages after message processing is complete.
+      example: |
+        // Before — message lost on crash
+        reader.CommitMessages(ctx, msg)
+        handleMessage(msg)
+
+        // After
+        handleMessage(msg)
+        reader.CommitMessages(ctx, msg)
+    references:
+      - https://pkg.go.dev/github.com/segmentio/kafka-go#Reader.CommitMessages
+
+  # ── Producer reliability ───────────────────────────────────────
+
+  - id: go-kafka-produce-error-unchecked
+    name: Kafka produce error not checked
+    description: >
+      Flags sarama SendMessage calls where the error return is not
+      captured. Silent message loss.
+    descriptions:
+      business: >
+        This code sends a message to Kafka without checking if it actually
+        arrived. Think of it like mailing a letter without a tracking
+        number -- you assume it was delivered, but it might have been lost.
+        For payment or order pipelines, this means silently dropped
+        transactions with no way to know they are missing.
+      developer: >
+        SendMessage returns a partition, offset, and error. Discarding the
+        error means you have zero visibility into delivery failures --
+        network blips, leader elections, and authorization errors all go
+        unnoticed. Always capture and handle the error return.
+    rationale: >
+      SendMessage returns a partition, offset, and error. If you discard
+      the error, you have no way to know if the message reached Kafka.
+      Network blips, broker leader elections, and topic authorization
+      failures all return errors that you will never see. In a payment
+      or order pipeline, this means silently dropped transactions.
+    severity: error
+    tags: [kafka, producer, error-handling, message-loss]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $PRODUCER.SendMessage(...)
+          - pattern-not: "$_, $_, $ERR := $PRODUCER.SendMessage(...)"
+          - pattern-not: "$_, $_, $ERR = $PRODUCER.SendMessage(...)"
+          - pattern-not: "$PART, $OFF, $ERR := $PRODUCER.SendMessage(...)"
+          - pattern-not: "$PART, $OFF, $ERR = $PRODUCER.SendMessage(...)"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Capture and handle the error return from SendMessage.
+      example: |
+        // Before — silent message loss
+        producer.SendMessage(msg)
+
+        // After
+        partition, offset, err := producer.SendMessage(msg)
+        if err != nil {
+            return fmt.Errorf("kafka produce: %w", err)
+        }
+    references:
+      - https://pkg.go.dev/github.com/IBM/sarama#SyncProducer.SendMessage
+
+  - id: go-kafka-async-producer-errors-unread
+    name: Async producer Errors channel not read
+    description: >
+      Flags sarama async producer creation without reading from the
+      Errors() channel. Production errors are silently dropped.
+    descriptions:
+      business: >
+        This code creates a message producer but never checks for errors.
+        Think of it like hiring a delivery driver and never checking if
+        packages arrive -- failures pile up silently until the system locks
+        up entirely. Eventually the producer deadlocks and your service
+        stops sending messages altogether.
+      developer: >
+        The sarama async producer sends errors to a channel. If nobody
+        reads from Errors(), the channel buffer fills and the producer
+        blocks, eventually deadlocking the application. Always drain the
+        Errors() channel in a separate goroutine, even if you just log and
+        increment a metric.
+    rationale: >
+      The sarama async producer sends errors to a channel. If nobody reads
+      from Errors(), the channel buffer fills up and the producer blocks,
+      eventually deadlocking your application. Even if you set
+      Return.Errors = false, you should still read Errors() to detect
+      configuration issues. The standard pattern is a goroutine that
+      drains the Errors() channel.
+    severity: warning
+    tags: [kafka, producer, error-handling, deadlock]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: sarama.NewAsyncProducer(...)
+          - pattern-not-inside: |
+              ...
+              $PRODUCER.Errors()
+              ...
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Read from the Errors() channel in a separate goroutine.
+      example: |
+        // Before — errors silently dropped, eventual deadlock
+        producer, err := sarama.NewAsyncProducer(brokers, config)
+
+        // After
+        producer, err := sarama.NewAsyncProducer(brokers, config)
+        go func() {
+            for err := range producer.Errors() {
+                log.Error("produce failed", "err", err)
+                produceErrors.Inc()
+            }
+        }()
+    references:
+      - https://pkg.go.dev/github.com/IBM/sarama#AsyncProducer
+
+  # ── Resource lifecycle ─────────────────────────────────────────
+
+  - id: go-kafka-no-close-sarama
+    name: Sarama producer/consumer not closed
+    description: >
+      Flags sarama producer or consumer creation without a corresponding
+      defer Close() call. Leaks connections and goroutines.
+    descriptions:
+      business: >
+        This code opens a connection to Kafka but never closes it properly.
+        Think of it like leaving a store without returning your shopping
+        cart -- it blocks resources for other users. Without proper cleanup,
+        connections leak, unflushed messages are lost, and the entire
+        consumer group stalls waiting for the dead member to time out.
+      developer: >
+        Sarama producers and consumers maintain TCP connections, background
+        goroutines, and internal buffers. Without Close(), resources leak,
+        producers lose buffered messages, and consumers block group
+        rebalancing because no LeaveGroup request is sent. Always defer
+        Close() immediately after creation.
+    rationale: >
+      Sarama producers and consumers maintain TCP connections, background
+      goroutines, and internal buffers. Without Close(), these resources
+      leak. For producers, unflushed messages in the buffer are lost.
+      For consumers, the consumer group cannot rebalance because the
+      member never sends a LeaveGroup request — other consumers in the
+      group will wait until the session timeout expires before
+      rebalancing, causing a processing pause for the entire group.
+    severity: error
+    tags: [kafka, resource-leak, graceful-shutdown]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $P, $ERR := sarama.NewSyncProducer(...)
+              - pattern: $P, $ERR := sarama.NewAsyncProducer(...)
+              - pattern: $P, $ERR := sarama.NewConsumer(...)
+              - pattern: $P, $ERR := sarama.NewConsumerGroup(...)
+          - pattern-not-inside: |
+              $P, $ERR := $CREATE(...)
+              ...
+              defer $P.Close()
+          - pattern-not-inside: |
+              $P, $ERR = $CREATE(...)
+              ...
+              defer $P.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer producer.Close() or defer consumer.Close() after creation.
+      example: |
+        // Before — connection and goroutine leak
+        producer, err := sarama.NewSyncProducer(brokers, config)
+        if err != nil { return err }
+
+        // After
+        producer, err := sarama.NewSyncProducer(brokers, config)
+        if err != nil { return err }
+        defer producer.Close()
+    references:
+      - https://pkg.go.dev/github.com/IBM/sarama#SyncProducer.Close
+
+  - id: go-kafka-no-close-kafkago
+    name: kafka-go reader/writer not closed
+    description: >
+      Flags kafka-go Reader or Writer creation without a corresponding
+      Close() call.
+    descriptions:
+      business: >
+        This code opens a Kafka connection but never closes it. Think of it
+        like leaving a phone line open after your call -- it ties up
+        resources and prevents proper handoff. Without closing, buffered
+        messages can be lost and other consumers in the group get delayed
+        waiting for the abandoned connection to time out.
+      developer: >
+        kafka-go Reader and Writer maintain TCP connections and background
+        goroutines. Without Close(), connections leak and consumer group
+        rebalancing stalls. For Writers, buffered messages may be lost.
+        Always defer Close() immediately after creation.
+    rationale: >
+      kafka-go Reader and Writer maintain TCP connections and background
+      goroutines. Without Close(), connections leak and the consumer
+      group cannot rebalance properly. For Writers, buffered messages
+      may be lost. Always defer Close() immediately after creation.
+    severity: error
+    tags: [kafka, resource-leak, graceful-shutdown, kafka-go]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $R := kafka.NewReader(...)
+              - pattern: $W := &kafka.Writer{...}
+          - pattern-not-inside: |
+              $R := $CREATE(...)
+              ...
+              defer $R.Close()
+          - pattern-not-inside: |
+              $W := &kafka.Writer{...}
+              ...
+              defer $W.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add defer reader.Close() or defer writer.Close() after creation.
+      example: |
+        // Before
+        r := kafka.NewReader(kafka.ReaderConfig{...})
+
+        // After
+        r := kafka.NewReader(kafka.ReaderConfig{...})
+        defer r.Close()
+    references:
+      - https://pkg.go.dev/github.com/segmentio/kafka-go#Reader.Close
+
+  # ── Consumer patterns ──────────────────────────────────────────
+
+  - id: go-kafka-consumer-no-context
+    name: Kafka consumer using context.Background()
+    description: >
+      Flags kafka-go ReadMessage or FetchMessage called with
+      context.Background(). The consumer loop cannot be stopped
+      gracefully on SIGTERM.
+    descriptions:
+      business: >
+        This consumer cannot be stopped cleanly when the service shuts down.
+        Think of it like an employee who ignores the fire alarm -- during
+        deployments or scaling events, the service hangs until Kubernetes
+        force-kills it, dropping any message that was mid-flight and
+        delaying the new instance from starting.
+      developer: >
+        context.Background() never cancels. When SIGTERM arrives, the
+        consumer loop blocks on ReadMessage indefinitely until the
+        orchestrator force-kills the process. Use a cancellable context
+        from signal.NotifyContext so the consumer exits cleanly and
+        releases its partition assignment.
+    rationale: >
+      context.Background() never cancels. When your service receives
+      SIGTERM, the consumer loop keeps blocking on ReadMessage and the
+      process hangs until the orchestrator (Kubernetes) force-kills it
+      after terminationGracePeriodSeconds. During that window, the
+      consumer holds its partition assignment, blocking the new instance
+      from consuming. Use a cancellable context derived from signal
+      handling so the consumer exits cleanly.
+    severity: warning
+    tags: [kafka, consumer, graceful-shutdown, context]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $READER.ReadMessage(context.Background())
+          - pattern: $READER.FetchMessage(context.Background())
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use a cancellable context derived from signal.NotifyContext or a shutdown channel.
+      example: |
+        // Before — consumer hangs on shutdown
+        msg, err := reader.ReadMessage(context.Background())
+
+        // After
+        ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+        defer cancel()
+        msg, err := reader.ReadMessage(ctx)
+    references:
+      - https://pkg.go.dev/github.com/segmentio/kafka-go#Reader.ReadMessage
+
+  - id: go-kafka-consumer-error-continue
+    name: Consumer error silently continued
+    description: >
+      Flags consumer loops where an error from message processing is
+      logged and then continued without routing to a dead-letter topic
+      or incrementing a failure metric.
+    descriptions:
+      business: >
+        This code logs errors and moves on, silently discarding failed
+        messages. Think of it like a mail carrier who drops undeliverable
+        packages in the trash instead of returning them -- you never know
+        they went missing. Without a dead-letter queue, failed messages
+        are gone forever with no visibility into how much data is being
+        lost.
+      developer: >
+        The log-and-continue pattern is the most common source of silent
+        data loss in Kafka consumers. Poison messages (malformed, schema
+        mismatch) get logged once and vanish. Route failures to a
+        dead-letter topic and increment a failure counter so you have
+        visibility and can reprocess later.
+    rationale: >
+      The log-and-continue pattern is the most common source of silent
+      data loss in Kafka consumers. Poison messages (malformed, schema
+      mismatch, unexpected nulls) are logged once and never seen again.
+      Without a dead-letter topic or at minimum a failure counter, you
+      have no visibility into how many messages are being dropped. At
+      principal level, every consumer must have a DLQ strategy or
+      explicit retry policy.
+    severity: warning
+    tags: [kafka, consumer, error-handling, dead-letter]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              if $ERR != nil {
+                ...
+                continue
+              }
+          - pattern-inside: |
+              for ... {
+                ...
+                $MSG, $ERR := $READER.ReadMessage(...)
+                ...
+              }
+          - pattern-not-inside: |
+              if $ERR != nil {
+                ...
+                $WRITER.WriteMessages(...)
+                ...
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Route failed messages to a dead-letter topic or increment a failure metric before continuing.
+      example: |
+        // Before — silent message loss
+        if err != nil {
+            log.Error("process failed", "err", err)
+            continue
+        }
+
+        // After — DLQ + metric
+        if err != nil {
+            dlqErr := dlqWriter.WriteMessages(ctx, kafka.Message{
+                Key:   msg.Key,
+                Value: msg.Value,
+                Headers: []kafka.Header{{Key: "error", Value: []byte(err.Error())}},
+            })
+            if dlqErr != nil {
+                log.Error("dlq write failed", "err", dlqErr)
+            }
+            processFailures.Inc()
+            continue
+        }
+    references:
+      - https://www.confluent.io/blog/error-handling-patterns-in-kafka/
+
+  # ── Security ───────────────────────────────────────────────────
+
+  - id: go-kafka-sasl-password-literal
+    name: SASL password as string literal
+    description: >
+      Flags Kafka SASL passwords configured as string literals in source
+      code.
+    descriptions:
+      business: >
+        This code has a password written directly in the source code. Think
+        of it like writing the alarm code on the front door -- anyone with
+        access to the code repository can read your production Kafka
+        credentials. This is a security incident waiting to happen that
+        could expose your entire messaging infrastructure.
+      developer: >
+        Hardcoded SASL credentials end up in version control, CI logs, and
+        Docker images. Anyone with repo access can read production Kafka
+        cluster credentials. Use environment variables, a secret store
+        (Vault, AWS Secrets Manager), or a credential provider interface
+        instead.
+    rationale: >
+      Hardcoded SASL credentials in source code end up in version control,
+      CI logs, and Docker images. Anyone with repository access can read
+      the production Kafka cluster credentials. Use environment variables,
+      a secret store (Vault, AWS Secrets Manager), or a credential provider
+      interface.
+    severity: error
+    tags: [kafka, security, secrets]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: |
+              $CONFIG.Net.SASL.Password = "..."
+          - pattern: |
+              $CONFIG.Net.SASL.User = "..."
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Load SASL credentials from environment variables or a secret store.
+      example: |
+        // Before — credentials in source code
+        config.Net.SASL.Password = "my-secret-password"
+
+        // After
+        config.Net.SASL.Password = os.Getenv("KAFKA_SASL_PASSWORD")
+    references:
+      - https://pkg.go.dev/github.com/IBM/sarama#Config
+
+  # ── Configuration ──────────────────────────────────────────────
+
+  - id: go-kafka-hardcoded-broker
+    name: Hardcoded Kafka broker addresses
+    description: >
+      Flags Kafka broker addresses configured as string literals. Broker
+      addresses should come from configuration or environment variables.
+    descriptions:
+      business: >
+        This code has Kafka server addresses written directly in the source.
+        Think of it like printing a street address on every product label --
+        if you move warehouses, you have to reprint everything. Without this
+        fix, switching Kafka clusters for disaster recovery or migration
+        requires a code change and full redeployment instead of a config
+        update.
+      developer: >
+        Hardcoded broker addresses couple your binary to a specific Kafka
+        cluster. You cannot promote the same artifact from staging to
+        production without recompilation. Load broker addresses from
+        environment variables or configuration to follow twelve-factor
+        principles.
+    rationale: >
+      Hardcoded broker addresses couple your binary to a specific Kafka
+      cluster. You cannot promote the same build artifact from staging
+      to production without recompilation. This violates twelve-factor
+      app principles and makes disaster recovery (cluster migration)
+      require a code change and deploy instead of a config change.
+    severity: warning
+    tags: [kafka, configuration, twelve-factor]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: 'sarama.NewSyncProducer([]string{"..."}, ...)'
+          - pattern: 'sarama.NewAsyncProducer([]string{"..."}, ...)'
+          - pattern: 'sarama.NewConsumer([]string{"..."}, ...)'
+          - pattern: 'sarama.NewConsumerGroup([]string{"..."}, ...)'
+          - pattern: |
+              &kafka.Reader{..., Brokers: []string{"..."}, ...}
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Load broker addresses from configuration or environment variables.
+      example: |
+        // Before
+        producer, err := sarama.NewSyncProducer([]string{"kafka-1:9092"}, config)
+
+        // After
+        brokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+        producer, err := sarama.NewSyncProducer(brokers, config)
+    references:
+      - https://12factor.net/config
+
+  - id: go-kafka-consumer-group-empty-handlers
+    name: ConsumerGroupHandler with empty Setup/Cleanup
+    description: >
+      Flags sarama ConsumerGroupHandler implementations where Setup()
+      and Cleanup() simply return nil without any rebalance handling.
+    descriptions:
+      business: >
+        This code ignores important events when Kafka redistributes work
+        across your consumers. Think of it like a shift change with no
+        handoff -- workers leave and arrive with no communication, so
+        in-progress work gets dropped or duplicated. Without handling these
+        events, you lose visibility into rebalancing and risk data integrity
+        issues.
+      developer: >
+        Empty Setup() and Cleanup() handlers mean you miss the chance to
+        flush in-progress batches, sync offsets, or release resources
+        during consumer group rebalances. In stateful consumers (aggregations,
+        windowed joins), this leads to duplicate processing or lost state.
+        At minimum, log the generation ID for debugging.
+    rationale: >
+      When a consumer group rebalances (member joins/leaves, topic
+      partition count changes), Setup() and Cleanup() are called on
+      every member. Empty implementations mean you miss the chance to
+      pause processing, flush in-progress batches, sync offsets, or
+      release resources. In a stateful consumer (aggregations, windowed
+      joins), this leads to duplicate processing or lost state. At
+      minimum, log the rebalance event and generation ID for debugging.
+    severity: info
+    tags: [kafka, consumer, rebalancing]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: |
+              func ($R $TYPE) Setup($S sarama.ConsumerGroupSession) error {
+                return nil
+              }
+          - pattern: |
+              func ($R $TYPE) Cleanup($S sarama.ConsumerGroupSession) error {
+                return nil
+              }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Implement Setup/Cleanup to handle rebalance events — at minimum log the generation ID.
+      example: |
+        // Before — rebalance events ignored
+        func (h *Handler) Setup(s sarama.ConsumerGroupSession) error {
+            return nil
+        }
+
+        // After — rebalance visibility
+        func (h *Handler) Setup(s sarama.ConsumerGroupSession) error {
+            log.Info("consumer group rebalanced",
+                "generation", s.GenerationID(),
+                "member", s.MemberID(),
+                "claims", s.Claims(),
+            )
+            return nil
+        }
+    references:
+      - https://pkg.go.dev/github.com/IBM/sarama#ConsumerGroupHandler

@@ -1,0 +1,508 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-testing
+  name: Go Testing
+  version: 0.1.0
+  description: >
+    Testing quality rules for Go projects. Catches test anti-patterns,
+    flaky synchronization, missing cleanup, and assertion gaps that
+    give false confidence and hide real bugs.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-testing.yaml
+
+rules:
+  # ── Flaky test patterns ────────────────────────────────────────
+
+  - id: go-test-sleep
+    name: Test uses time.Sleep for synchronization
+    description: >
+      Flags time.Sleep calls inside test functions. Sleep-based
+      synchronization makes tests flaky — they pass on fast machines
+      and fail on slow CI runners.
+    descriptions:
+      business: >
+        Tests that wait a fixed amount of time are unreliable. They
+        pass on a fast developer machine but randomly fail in CI, causing
+        wasted time re-running pipelines and eroding trust in the test
+        suite. Eventually the team ignores test failures because "it's
+        probably just a flaky test."
+      developer: >
+        time.Sleep in tests is a code smell for a race condition. The
+        test sleeps hoping that a goroutine or async operation completes
+        in time. Use synchronization primitives instead: channels,
+        sync.WaitGroup, or test helper functions that poll with a
+        deadline.
+    rationale: >
+      time.Sleep is the leading cause of flaky tests in Go codebases.
+      The test passes locally because your machine is fast enough, then
+      fails randomly in CI because the sleep duration wasn't long enough
+      for a loaded runner. Making the sleep longer wastes CI time across
+      every run. The correct fix is explicit synchronization: channels,
+      sync.WaitGroup, or a polling helper with a timeout.
+    severity: warning
+    tags: [testing, flaky]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: time.Sleep(...)
+          - pattern-inside: |
+              func Test$NAME($T *testing.T) {
+                  ...
+              }
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Replace time.Sleep with a channel, sync.WaitGroup, or polling helper with timeout.
+      example: |
+        // Before — flaky sleep-based synchronization
+        func TestWorker(t *testing.T) {
+            go startWorker()
+            time.Sleep(100 * time.Millisecond)
+            assertWorkerReady(t)
+        }
+
+        // After — explicit synchronization
+        func TestWorker(t *testing.T) {
+            ready := make(chan struct{})
+            go startWorker(ready)
+            select {
+            case <-ready:
+                assertWorkerReady(t)
+            case <-time.After(5 * time.Second):
+                t.Fatal("worker did not become ready")
+            }
+        }
+    references:
+      - https://go.dev/doc/articles/race_detector
+      - https://pkg.go.dev/testing
+
+  - id: go-test-fatal-goroutine
+    name: t.Fatal or t.FailNow called from a goroutine
+    description: >
+      Flags calls to t.Fatal, t.Fatalf, or t.FailNow inside goroutines
+      launched within tests. These functions call runtime.Goexit() on
+      the current goroutine, not the test goroutine, causing a panic.
+    descriptions:
+      business: >
+        This code causes the test suite to crash with a confusing panic
+        instead of a clean test failure. The panic message gives no
+        indication of what actually failed, making debugging difficult
+        and wasting developer time.
+      developer: >
+        t.Fatal and t.FailNow call runtime.Goexit() which only exits
+        the current goroutine. When called from a spawned goroutine,
+        they exit that goroutine instead of the test goroutine, causing
+        a panic. Use t.Error to report failures from goroutines, or
+        communicate results back to the test goroutine via a channel.
+    rationale: >
+      The testing package documentation explicitly warns: "A test or
+      benchmark function is run in a single goroutine and can itself
+      create additional goroutines. However, testing functions must be
+      called only from the goroutine running the test function." Fatal
+      and FailNow call runtime.Goexit which only stops the current
+      goroutine. From a spawned goroutine, this causes a panic instead
+      of a clean test failure.
+    severity: error
+    tags: [testing, goroutine]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: $T.Fatal(...)
+              - pattern-inside: |
+                  go func(...) {
+                      ...
+                  }(...)
+          - patterns:
+              - pattern: $T.Fatalf(...)
+              - pattern-inside: |
+                  go func(...) {
+                      ...
+                  }(...)
+          - patterns:
+              - pattern: $T.FailNow()
+              - pattern-inside: |
+                  go func(...) {
+                      ...
+                  }(...)
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Use t.Error instead of t.Fatal in goroutines, or signal via channel.
+      example: |
+        // Before — panics because Fatal is called from goroutine
+        func TestConcurrent(t *testing.T) {
+            go func() {
+                if err := doWork(); err != nil {
+                    t.Fatal(err)
+                }
+            }()
+        }
+
+        // After — error reported correctly
+        func TestConcurrent(t *testing.T) {
+            errs := make(chan error, 1)
+            go func() {
+                errs <- doWork()
+            }()
+            if err := <-errs; err != nil {
+                t.Fatal(err)
+            }
+        }
+    references:
+      - https://pkg.go.dev/testing#T.FailNow
+      - https://go.dev/doc/articles/race_detector
+
+  # ── Test hygiene ───────────────────────────────────────────────
+
+  - id: go-test-ignored-error
+    name: Error return value ignored in test
+    description: >
+      Flags blank identifier assignments (_ =) for error return values
+      in test files. Ignoring errors in tests hides failures and gives
+      false confidence that the code works.
+    descriptions:
+      business: >
+        This test ignores errors, meaning it can pass even when the code
+        it's testing is broken. A test suite that doesn't check errors
+        gives false confidence — the team thinks the code works because
+        tests are green, but the tests aren't actually verifying anything.
+      developer: >
+        Using _, _ = or _ = to discard error returns in test code means
+        the test passes regardless of whether the operation succeeded.
+        Check the error with if err != nil { t.Fatal(err) } or use
+        require.NoError(t, err) from testify.
+    rationale: >
+      Tests exist to verify correctness. Ignoring error returns defeats
+      that purpose — the test passes even when the operation fails. This
+      is especially dangerous in setup code: if a test database
+      connection fails silently, every subsequent assertion tests the
+      wrong thing. Always check error returns in tests, at minimum with
+      t.Fatal(err).
+    severity: warning
+    tags: [testing, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: $VAR, _ := $FUNC(...)
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Check the error return value with t.Fatal(err) or require.NoError(t, err).
+      example: |
+        // Before — error silently ignored
+        func TestCreateUser(t *testing.T) {
+            user, _ := CreateUser("alice")
+            assert.Equal(t, "alice", user.Name)
+        }
+
+        // After — error checked
+        func TestCreateUser(t *testing.T) {
+            user, err := CreateUser("alice")
+            require.NoError(t, err)
+            assert.Equal(t, "alice", user.Name)
+        }
+    references:
+      - https://pkg.go.dev/testing
+      - https://go.dev/wiki/CodeReviewComments#handle-errors
+
+  - id: go-test-cleanup
+    name: Temp resource created without t.Cleanup
+    description: >
+      Flags os.MkdirTemp or os.CreateTemp calls in test files that
+      are not followed by a t.Cleanup call for the created resource.
+    descriptions:
+      business: >
+        Tests that create temporary files and directories without
+        cleaning them up leave garbage on disk. Over time this fills up
+        CI runner disks, causing unrelated test failures and requiring
+        manual cleanup.
+      developer: >
+        os.MkdirTemp and os.CreateTemp create resources that persist
+        after the test. Use t.Cleanup to register a removal function
+        that runs after the test completes, even if the test fails or
+        panics. This is cleaner than defer because it works in test
+        helpers called from subtests.
+    rationale: >
+      Temporary files and directories created during tests accumulate
+      on CI runners across thousands of test runs. Without cleanup, the
+      runner disk fills up, causing cascading failures in unrelated
+      tests. t.Cleanup is preferred over defer because it executes after
+      the test and all its subtests complete, and it works correctly
+      in test helper functions.
+    severity: warning
+    tags: [testing, resource-management]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: os.MkdirTemp(...)
+              - pattern: os.CreateTemp(...)
+          - pattern-not-inside: |
+              ...
+              $T.Cleanup(...)
+              ...
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Register t.Cleanup to remove the temp resource after the test.
+      example: |
+        // Before — temp directory leaked
+        func TestProcess(t *testing.T) {
+            dir, err := os.MkdirTemp("", "test-*")
+            require.NoError(t, err)
+            // dir persists after test
+
+        // After — cleaned up automatically
+        func TestProcess(t *testing.T) {
+            dir, err := os.MkdirTemp("", "test-*")
+            require.NoError(t, err)
+            t.Cleanup(func() { os.RemoveAll(dir) })
+        }
+    references:
+      - https://pkg.go.dev/testing#T.Cleanup
+      - https://pkg.go.dev/os#MkdirTemp
+
+  - id: go-test-hardcoded-port
+    name: Test uses hardcoded network port
+    description: >
+      Flags net.Listen calls in test files that bind to a specific port
+      number. Hardcoded ports cause test failures when the port is
+      already in use by another test or process.
+    descriptions:
+      business: >
+        Tests that use a fixed port number fail when run in parallel or
+        on a machine where that port is already in use. This makes CI
+        flaky and prevents developers from running tests concurrently.
+      developer: >
+        Using net.Listen("tcp", ":8080") in tests binds to a specific
+        port that may already be in use. Use port 0 (":0") to let the
+        OS assign an available port, then read the actual port from
+        the listener's Addr().
+    rationale: >
+      Hardcoded ports in tests cause "address already in use" failures
+      when tests run in parallel (go test -parallel), when multiple
+      packages run concurrently (go test ./...), or when another process
+      occupies the port. Port 0 tells the OS to assign any available
+      port, eliminating the collision entirely.
+    severity: warning
+    tags: [testing, flaky, networking]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: net.Listen("tcp", ":8080")
+          - pattern: net.Listen("tcp", ":8081")
+          - pattern: net.Listen("tcp", ":3000")
+          - pattern: net.Listen("tcp", ":9090")
+          - pattern: net.Listen("tcp", ":5000")
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Use port 0 (":0") to auto-assign an available port.
+      example: |
+        // Before — fails if port 8080 is in use
+        ln, err := net.Listen("tcp", ":8080")
+
+        // After — OS assigns an available port
+        ln, err := net.Listen("tcp", ":0")
+        addr := ln.Addr().String()
+    references:
+      - https://pkg.go.dev/net#Listen
+      - https://pkg.go.dev/testing#hdr-Subtests_and_Sub_benchmarks
+
+  # ── Test completeness ──────────────────────────────────────────
+
+  - id: go-test-skip-without-reason
+    name: t.Skip called without a reason
+    description: >
+      Flags t.Skip() calls with no arguments. A skip without a reason
+      makes it impossible to know why the test was skipped or when it
+      should be re-enabled.
+    descriptions:
+      business: >
+        Skipped tests without explanations accumulate over time. Nobody
+        knows why they were skipped or whether it's safe to re-enable
+        them. They silently reduce test coverage and hide potential bugs.
+      developer: >
+        t.Skip() with no arguments produces a skip message with no
+        context. When reviewing CI output, you see "SKIP" but cannot
+        determine the reason. Add a reason string like
+        t.Skip("requires database") so the skip is self-documenting.
+    rationale: >
+      Skipped tests are deferred work. Without a reason, they become
+      forgotten work — nobody knows if the skip was temporary (waiting
+      for a fix), environmental (requires a database), or permanent
+      (feature removed). A reason string makes the skip self-documenting
+      and enables grep-based audits of all skipped tests.
+    severity: warning
+    tags: [testing, documentation]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: $T.Skip()
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Add a reason string explaining why the test is skipped.
+      example: |
+        // Before — no context for why test is skipped
+        func TestDatabase(t *testing.T) {
+            t.Skip()
+        }
+
+        // After — self-documenting skip
+        func TestDatabase(t *testing.T) {
+            t.Skip("requires PostgreSQL; set TEST_DB_URL to enable")
+        }
+    references:
+      - https://pkg.go.dev/testing#T.Skip
+
+  - id: go-test-no-parallel
+    name: Test function does not call t.Parallel
+    description: >
+      Flags top-level test functions that do not call t.Parallel().
+      Without t.Parallel, tests run sequentially, making the test
+      suite slower than necessary.
+    descriptions:
+      business: >
+        Tests that don't opt into parallel execution run one at a time,
+        making the entire test suite slower. Slow test suites discourage
+        developers from running tests frequently and slow down CI
+        pipelines, increasing time-to-merge.
+      developer: >
+        Go runs tests sequentially by default within a package. Calling
+        t.Parallel() at the start of each test allows the test runner to
+        execute tests concurrently, significantly reducing total suite
+        time. Tests that share state need synchronization, but most
+        tests are independent and should be parallel.
+    rationale: >
+      Sequential tests waste CI time. A package with 50 tests that each
+      take 100ms runs in 5 seconds sequentially but under 1 second with
+      t.Parallel(). Parallel execution also surfaces race conditions
+      and shared-state bugs that sequential runs hide. The Go race
+      detector combined with parallel tests catches concurrency bugs
+      that would otherwise reach production.
+    severity: warning
+    tags: [testing, performance]
+    detector:
+      capability: golangci-lint
+      config:
+        linter: tparallel
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Add t.Parallel() as the first statement in the test function.
+      example: |
+        // Before — runs sequentially
+        func TestAdd(t *testing.T) {
+            result := Add(1, 2)
+            assert.Equal(t, 3, result)
+        }
+
+        // After — runs in parallel
+        func TestAdd(t *testing.T) {
+            t.Parallel()
+            result := Add(1, 2)
+            assert.Equal(t, 3, result)
+        }
+    references:
+      - https://pkg.go.dev/testing#T.Parallel
+      - https://go.dev/blog/subtests
+
+  - id: go-test-no-assertion
+    name: Test function with no assertions
+    description: >
+      Flags test functions that contain no calls to t.Error, t.Fatal,
+      t.Fail, or common assertion libraries. A test with no assertions
+      always passes regardless of the code's behavior.
+    descriptions:
+      business: >
+        This test doesn't actually check anything. It runs code but
+        never verifies the result. It shows up as "PASS" in CI but
+        provides zero confidence that the code works correctly. It's
+        worse than no test because it creates a false sense of coverage.
+      developer: >
+        A test function that makes no assertion calls (t.Error, t.Fatal,
+        t.Fail, assert.*, require.*) is an empty test. It exercises code
+        paths but verifies nothing. Add assertions that check return
+        values, state changes, or error conditions.
+    rationale: >
+      Tests without assertions are cargo cult testing — they look like
+      tests, show coverage in reports, and always pass, but verify
+      nothing. They are actively harmful because they prevent the team
+      from noticing missing test coverage. A test must assert something
+      or it has no value.
+    severity: warning
+    tags: [testing, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func Test$NAME($T *testing.T) {
+                  ...
+              }
+          - pattern-not: |
+              func Test$NAME($T *testing.T) {
+                  ...
+                  $T.Error(...)
+                  ...
+              }
+          - pattern-not: |
+              func Test$NAME($T *testing.T) {
+                  ...
+                  $T.Errorf(...)
+                  ...
+              }
+          - pattern-not: |
+              func Test$NAME($T *testing.T) {
+                  ...
+                  $T.Fatal(...)
+                  ...
+              }
+          - pattern-not: |
+              func Test$NAME($T *testing.T) {
+                  ...
+                  $T.Fatalf(...)
+                  ...
+              }
+          - pattern-not: |
+              func Test$NAME($T *testing.T) {
+                  ...
+                  $T.Fail()
+                  ...
+              }
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**"]
+    fix:
+      message: Add assertions that verify return values, state, or error conditions.
+      example: |
+        // Before — no assertions, always passes
+        func TestParse(t *testing.T) {
+            Parse("input")
+        }
+
+        // After — verifies behavior
+        func TestParse(t *testing.T) {
+            result, err := Parse("input")
+            require.NoError(t, err)
+            assert.Equal(t, "expected", result)
+        }
+    references:
+      - https://pkg.go.dev/testing
+      - https://go.dev/wiki/TableDrivenTests

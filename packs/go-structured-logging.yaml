@@ -1,0 +1,673 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-structured-logging
+  name: Go Structured Logging
+  version: 0.1.0
+  description: >
+    Principal-level structured logging rules for Go services. Catches
+    unstructured log calls, missing correlation IDs, dangerous log
+    levels, sensitive data exposure, and logging anti-patterns that
+    make production debugging impossible.
+  descriptions:
+    business: >
+      When production breaks at 3 AM, logs are the first thing the on-call
+      engineer looks at. This pack ensures your logs are structured,
+      searchable, and complete — so incidents are diagnosed in minutes
+      instead of hours. It also prevents sensitive data (passwords, API
+      keys) from leaking into log aggregation systems where every
+      engineer can see them, which is a compliance violation.
+    developer: >
+      These rules enforce structured logging hygiene — slog over fmt.Println,
+      context-aware variants for trace correlation, correct severity levels
+      for alerting, and no sensitive data in log fields. The common thread
+      is that unstructured or misconfigured logging looks fine in development
+      but makes production debugging impossible and can create security and
+      compliance exposure at scale.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-structured-logging.yaml
+  tags:
+    language: go
+    category: observability
+    architecture: [services, workers, pipelines]
+
+rules:
+  # ── Unstructured logging ────────────────────────────────────────
+
+  - id: go-log-fmt-println
+    name: Using fmt print functions for logging
+    description: >
+      Flags usage of fmt.Println(), fmt.Printf(), or the builtin println()
+      for application logging. These write unstructured text to stdout with
+      no severity level, timestamp, or structured fields.
+    descriptions:
+      business: >
+        This code writes log messages as plain text that your monitoring
+        tools (Datadog, Splunk, CloudWatch) cannot parse or search. Think
+        of it like filing documents by throwing them loose into a box
+        instead of a filing cabinet. Without this fix, when production
+        breaks, engineers cannot filter, search, or alert on these log
+        lines — making incidents take much longer to diagnose.
+      developer: >
+        fmt.Println/Printf was used for application logging instead of a
+        structured logger. What happens is the output is raw text with no
+        severity, no timestamp, and no queryable fields — log aggregation
+        systems either drop it or store it as unparseable noise. The
+        correct pattern is always using slog.Info() (Go 1.21+), zap, or
+        zerolog with structured key-value pairs that your aggregation
+        tools can index and alert on.
+    rationale: >
+      fmt.Println and friends are designed for user-facing CLI output, not
+      application logging. They produce raw text lines that are invisible
+      to log aggregation systems (Datadog, Splunk, CloudWatch) because
+      there's no JSON structure, no severity level to filter on, and no
+      timestamp to order by. In production, these lines either get lost
+      entirely or show up as unparseable noise in your log pipeline. Worse,
+      they bypass any log-level gating you've configured — you can't turn
+      them off without a code change. Use log/slog (Go 1.21+), zap, or
+      zerolog, which emit structured key-value pairs that your aggregation
+      tools can index, query, and alert on.
+    severity: warning
+    tags: [logging, structured, observability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: fmt.Println(...)
+          - pattern: fmt.Printf(...)
+          - pattern: println(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/main.go", "**/*_test.go"]
+    fix:
+      message: Replace fmt.Println/Printf with a structured logger (slog.Info, zap.Info, zerolog).
+      example: |
+        // Before — unstructured, unparseable, unqueryable
+        fmt.Printf("processing order %s for user %s\n", orderID, userID)
+
+        // After — structured, indexed, queryable
+        slog.Info("processing order",
+            "order_id", orderID,
+            "user_id", userID,
+        )
+    references:
+      - https://pkg.go.dev/log/slog
+      - https://go.dev/blog/slog
+      - https://12factor.net/logs
+
+  # ── Process lifecycle ───────────────────────────────────────────
+
+  - id: go-log-fatal-outside-main
+    name: log.Fatal/Panic used outside main() or init()
+    description: >
+      Flags usage of log.Fatal, log.Fatalf, log.Fatalln, log.Panic,
+      log.Panicf, or log.Panicln outside of main() or init() functions.
+      These functions call os.Exit(1) or panic() respectively, bypassing
+      deferred cleanup, graceful shutdown, and open telemetry flush.
+    descriptions:
+      business: >
+        This code can force-kill your service instantly without letting
+        it finish what it is doing. Think of it like pulling the power
+        plug on a computer mid-save — open transactions are abandoned,
+        in-flight customer requests are dropped, and monitoring data is
+        lost. This causes partial updates, data corruption, and makes
+        outages harder to diagnose because the last few seconds of
+        activity vanish.
+      developer: >
+        log.Fatal or log.Panic was called outside main()/init(). What
+        happens is os.Exit(1) fires immediately — no defers run, no
+        graceful shutdown hooks, no in-flight request draining, no
+        telemetry flush. In Kubernetes, the PreStop hook never executes
+        and the load balancer keeps routing to a dead pod. The correct
+        pattern is always returning an error up the call stack and
+        letting main() decide how to exit cleanly.
+    rationale: >
+      log.Fatal calls os.Exit(1) immediately. No defers run, no graceful
+      shutdown hooks fire, no in-flight requests drain, no open telemetry
+      spans flush, no database connections close cleanly. In a Kubernetes
+      pod, this means your PreStop hook never runs, your load balancer
+      keeps sending traffic to a dead container, and your last few trace
+      spans vanish. log.Panic is slightly better (defers run) but still
+      unrecoverable in most architectures. These functions are acceptable
+      in main() and init() where the process hasn't started serving yet.
+      Everywhere else, return an error up the call stack and let main()
+      decide how to exit.
+    severity: error
+    tags: [logging, process-lifecycle, graceful-shutdown]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: log.Fatal(...)
+              - pattern: log.Fatalf(...)
+              - pattern: log.Fatalln(...)
+              - pattern: log.Panic(...)
+              - pattern: log.Panicf(...)
+              - pattern: log.Panicln(...)
+          - pattern-not-inside: |
+              func main() { ... }
+          - pattern-not-inside: |
+              func init() { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Return an error instead of calling log.Fatal/Panic. Let main() handle process exit.
+      example: |
+        // Before — kills the process, skips all cleanup
+        func (s *Server) loadConfig(path string) *Config {
+            cfg, err := os.ReadFile(path)
+            if err != nil {
+                log.Fatalf("failed to read config: %v", err)
+            }
+            // ...
+        }
+
+        // After — returns error, caller decides
+        func (s *Server) loadConfig(path string) (*Config, error) {
+            cfg, err := os.ReadFile(path)
+            if err != nil {
+                return nil, fmt.Errorf("reading config %s: %w", path, err)
+            }
+            // ...
+        }
+    references:
+      - https://pkg.go.dev/log#Fatal
+      - https://go.dev/wiki/CodeReviewComments#dont-panic
+      - https://peter.bourgon.org/blog/2017/06/09/theory-of-modern-go.html
+
+  # ── Sensitive data ──────────────────────────────────────────────
+
+  - id: go-log-sensitive-field
+    name: Sensitive data in structured log field
+    description: >
+      Flags structured log calls where the field name suggests sensitive
+      data such as passwords, tokens, secrets, SSNs, credit card numbers,
+      API keys, private keys, or auth credentials.
+    descriptions:
+      business: >
+        This code writes sensitive data (passwords, API keys, credit card
+        numbers) into log files that every engineer on the team can search.
+        Think of it like announcing customer credit card numbers over a
+        company-wide intercom. This creates an immediate compliance
+        violation (PCI-DSS, SOC 2, GDPR, HIPAA) and a security incident
+        — leaked credentials in logs are the number one source of secret
+        exposure in post-mortems.
+      developer: >
+        A sensitive field name (password, token, secret, ssn, credit_card,
+        api_key, etc.) was passed to a structured log call. What happens is
+        the raw value gets indexed in your log aggregation system where it
+        is broadly accessible and potentially retained for years. The
+        correct pattern is never logging the sensitive value — log a
+        non-sensitive identifier (user ID, request ID) or a masked version
+        (last four digits) instead.
+    rationale: >
+      Log aggregation systems (Datadog, Splunk, ELK, CloudWatch) are
+      designed for broad access — every engineer on the team can search
+      them. Logging sensitive data creates a compliance violation (PCI-DSS,
+      SOC 2, GDPR, HIPAA) and a security incident waiting to happen.
+      Credentials in logs are the number one source of secret leaks in
+      post-mortems. Even if your log pipeline has redaction rules, they
+      are regex-based and fragile — the only reliable defense is never
+      logging the data in the first place. If you need to log that a
+      sensitive operation occurred, log a non-sensitive identifier (user
+      ID, request ID) or a masked version (last four digits).
+    severity: error
+    tags: [logging, security, pii, compliance]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: slog.String($KEY, $VAL)
+              - pattern: slog.Any($KEY, $VAL)
+              - pattern: $LOGGER.With($KEY, $VAL)
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: "(?i).*(password|token|secret|ssn|credit.card|api.key|private.key|auth).*"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Remove the sensitive field or replace with a non-sensitive identifier (user ID, masked value).
+      example: |
+        // Before — credential exposed in logs
+        slog.Info("user authenticated",
+            slog.String("api_key", apiKey),
+            slog.String("user_id", userID),
+        )
+
+        // After — sensitive value removed, identifier preserved
+        slog.Info("user authenticated",
+            slog.String("user_id", userID),
+            slog.String("api_key_prefix", apiKey[:8]+"..."),
+        )
+    references:
+      - https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html#data-to-exclude
+      - https://cwe.mitre.org/data/definitions/532.html
+      - https://www.pcisecuritystandards.org/documents/PCI_DSS_Logging_Guidelines.pdf
+
+  # ── Structured field hygiene ────────────────────────────────────
+
+  - id: go-log-string-interpolation
+    name: fmt.Sprintf used inside structured log call
+    description: >
+      Flags usage of fmt.Sprintf() as the message argument to structured
+      log calls (slog.Info, slog.Error, logger.Info, etc.). This bakes
+      dynamic values into the message string instead of structured fields.
+    descriptions:
+      business: >
+        This code buries important data inside log message text instead
+        of putting it in searchable fields. Think of it like writing the
+        order number inside a paragraph of notes instead of in the
+        "Order #" column of a spreadsheet. Without this fix, engineers
+        cannot filter or build dashboards on these values and must resort
+        to fragile text searches during incidents, slowing down diagnosis.
+      developer: >
+        fmt.Sprintf was used as the message argument to a structured log
+        call. What happens is dynamic values are interpolated into the
+        message string and become unsearchable — your log aggregation
+        system cannot index, filter, or alert on values trapped inside
+        free-form text. The correct pattern is always using a static
+        message string for the event category and passing dynamic values
+        as structured key-value fields.
+    rationale: >
+      The entire point of structured logging is that dynamic values live
+      in discrete, queryable fields — not interpolated into a format
+      string. When you write slog.Info(fmt.Sprintf("order %s shipped",
+      id)), the order ID is trapped inside the message text. Your log
+      aggregation system can't index it, you can't filter by it, and you
+      can't build dashboards on it. You end up writing fragile regex
+      queries in Datadog instead of a simple field filter like
+      @order_id:abc123. Move dynamic values to structured key-value
+      pairs and keep the message as a static string that describes the
+      event category.
+    severity: warning
+    tags: [logging, structured, observability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: slog.Info(fmt.Sprintf(...), ...)
+          - pattern: slog.Warn(fmt.Sprintf(...), ...)
+          - pattern: slog.Error(fmt.Sprintf(...), ...)
+          - pattern: slog.Debug(fmt.Sprintf(...), ...)
+          - pattern: $LOGGER.Info(fmt.Sprintf(...), ...)
+          - pattern: $LOGGER.Warn(fmt.Sprintf(...), ...)
+          - pattern: $LOGGER.Error(fmt.Sprintf(...), ...)
+          - pattern: $LOGGER.Debug(fmt.Sprintf(...), ...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Replace fmt.Sprintf with a static message and structured key-value fields.
+      example: |
+        // Before — dynamic values trapped in message string
+        slog.Info(fmt.Sprintf("order %s shipped to %s", orderID, region))
+
+        // After — static message, queryable fields
+        slog.Info("order shipped",
+            "order_id", orderID,
+            "region", region,
+        )
+    references:
+      - https://pkg.go.dev/log/slog#hdr-Attrs_and_Values
+      - https://go.dev/blog/slog
+      - https://www.datadoghq.com/blog/go-logging/#use-structured-logging
+
+  # ── Performance ─────────────────────────────────────────────────
+
+  - id: go-log-in-loop
+    name: Log statement inside tight loop
+    description: >
+      Flags structured log calls (slog or injected logger) inside for
+      or range loops. High-frequency logging can produce millions of
+      lines per second, overwhelming log aggregation pipelines.
+    descriptions:
+      business: >
+        This code writes a log line for every single item in a loop,
+        which can produce millions of log lines per minute. Think of it
+        like a security camera that takes a photo every millisecond
+        instead of recording video — it fills up storage instantly and
+        the cost is enormous. Log aggregation services charge per
+        gigabyte ingested, and a single hot loop can cost more than the
+        rest of your service's logging combined.
+      developer: >
+        A structured log call was placed inside a for/range loop. What
+        happens is each iteration emits a log entry — with 100K items,
+        that is 100K JSON log lines serialized, written, shipped, and
+        indexed. This causes CPU overhead from serialization, inflated
+        log ingestion costs, and buries important signals in noise. The
+        correct pattern is logging a summary after the loop (count,
+        duration, error rate) or using slog.Debug with level gating.
+    rationale: >
+      A log statement inside a loop that iterates over a large dataset
+      (database rows, queue messages, API results) can emit thousands to
+      millions of log lines per minute. This creates three production
+      problems: (1) cost — Datadog, Splunk, and CloudWatch charge per GB
+      ingested, and a single hot loop can generate more log volume than
+      the rest of your service combined; (2) performance — serializing
+      log entries (especially JSON) adds CPU overhead and memory pressure
+      on every iteration; (3) signal-to-noise — the important log lines
+      from other parts of your service get buried. Instead, log a summary
+      after the loop with aggregate metrics (count, duration, error rate),
+      or use slog.Debug with level gating so it's off by default.
+    severity: warning
+    tags: [logging, performance, cost]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: slog.Info(...)
+              - pattern: slog.Warn(...)
+              - pattern: slog.Error(...)
+              - pattern: slog.Debug(...)
+              - pattern: $LOGGER.Info(...)
+              - pattern: $LOGGER.Warn(...)
+              - pattern: $LOGGER.Error(...)
+          - pattern-inside: |
+              for ... { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Move the log statement outside the loop. Log a summary with count/duration after the loop completes.
+      example: |
+        // Before — one log line per item, potentially millions
+        for _, order := range orders {
+            slog.Info("processing order", "order_id", order.ID)
+            process(order)
+        }
+
+        // After — single summary log after loop
+        start := time.Now()
+        var errCount int
+        for _, order := range orders {
+            if err := process(order); err != nil {
+                errCount++
+            }
+        }
+        slog.Info("batch processing complete",
+            "total", len(orders),
+            "errors", errCount,
+            "duration", time.Since(start),
+        )
+    references:
+      - https://www.datadoghq.com/blog/go-logging/#avoid-logging-in-hot-paths
+      - https://pkg.go.dev/log/slog#hdr-Levels
+      - https://opentelemetry.io/docs/specs/otel/logs/#log-data-model
+
+  # ── Severity correctness ────────────────────────────────────────
+
+  - id: go-log-error-as-info
+    name: Info-level log inside error handling block
+    description: >
+      Flags slog.Info() or logger.Info() calls inside if err != nil
+      blocks. When an error has occurred, the log should be at Error or
+      Warn level.
+    descriptions:
+      business: >
+        This code logs errors as informational messages, which means
+        your monitoring and alerting systems will not flag them. Think of
+        it like labeling a fire alarm as a "doorbell" — when it rings,
+        nobody responds with urgency. Without this fix, real failures go
+        unnoticed until customers report them, turning small problems
+        into major outages because the on-call team never saw the alert.
+      developer: >
+        slog.Info was called inside an if err != nil block. What happens
+        is error-rate dashboards and alerting rules that key off Error or
+        Warn severity never trigger — the failure is logged but invisible
+        to your monitoring stack. The correct pattern is always using
+        slog.Error for unexpected failures or slog.Warn for expected/handled
+        errors inside error-handling blocks.
+    rationale: >
+      Log severity drives alerting and triage. Your on-call playbook says
+      "investigate Error-level logs, review Warn-level trends, ignore
+      Info-level noise." When you log an error condition at Info level,
+      your alerting rules never fire, your error-rate dashboards don't
+      budge, and the issue is invisible to the on-call engineer until a
+      customer reports it. This is how small failures compound into
+      outages — the signal was there, but it was mislabeled. If err != nil,
+      the minimum severity is Warn (expected/handled error) or Error
+      (unexpected failure requiring investigation).
+    severity: warning
+    tags: [logging, severity, alerting]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: slog.Info(...)
+              - pattern: $LOGGER.Info(...)
+          - pattern-inside: |
+              if $ERR != nil { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use slog.Error() or slog.Warn() instead of slog.Info() inside error handling blocks.
+      example: |
+        // Before — error hidden at Info level, alerts never fire
+        if err != nil {
+            slog.Info("failed to process payment", "error", err)
+        }
+
+        // After — correct severity, alerting works
+        if err != nil {
+            slog.Error("failed to process payment", "error", err)
+        }
+    references:
+      - https://pkg.go.dev/log/slog#Level
+      - https://sre.google/sre-book/monitoring-distributed-systems/
+
+  # ── Error context ───────────────────────────────────────────────
+
+  - id: go-log-error-without-err
+    name: Error-level log without the error value
+    description: >
+      Flags slog.Error() calls with only a message argument (no
+      structured error field) inside an if err != nil block. The log
+      line says something went wrong but doesn't include what.
+    descriptions:
+      business: >
+        This code logs that an error happened but does not include what
+        the error actually was. Think of it like a car dashboard warning
+        light that says "something is wrong" with no further detail. When
+        the on-call engineer sees this at 3 AM, they have to hunt through
+        multiple systems to figure out the cause — turning a 5-minute
+        diagnosis into a 30-minute investigation while the outage
+        continues.
+      developer: >
+        slog.Error was called with only a message string and no error
+        field inside an if err != nil block. What happens is the log line
+        says "failed to process order" but the actual error (timeout?
+        permission denied? nil pointer?) is discarded. The correct pattern
+        is always including the error as a structured field —
+        slog.Error("failed to process order", "error", err) — so it is
+        immediately visible and searchable in your log aggregation system.
+    rationale: >
+      When an incident responder sees an Error-level log line that says
+      "failed to process order" but doesn't include the actual error
+      value, they have to correlate with other signals (traces, metrics)
+      to figure out the cause. Was it a timeout? A permission denied? A
+      nil pointer? The error value is the single most important piece of
+      debugging context, and omitting it from the log line forces
+      engineers into a multi-tool scavenger hunt during an outage. Always
+      include the error as a structured field so it's indexable,
+      searchable, and immediately visible.
+    severity: warning
+    tags: [logging, error-handling, debugging]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: slog.Error($MSG)
+          - pattern-inside: |
+              if $ERR != nil { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Include the error value as a structured field — slog.Error(msg, "error", err).
+      example: |
+        // Before — error occurred but the value is lost
+        if err != nil {
+            slog.Error("failed to process order")
+        }
+
+        // After — error value included, immediately debuggable
+        if err != nil {
+            slog.Error("failed to process order",
+                "error", err,
+                "order_id", orderID,
+            )
+        }
+    references:
+      - https://pkg.go.dev/log/slog#Error
+      - https://go.dev/blog/slog
+
+  # ── Standard library migration ─────────────────────────────────
+
+  - id: go-log-std-library
+    name: Standard log package used instead of log/slog
+    description: >
+      Flags usage of log.Println(), log.Printf(), or log.Print() outside
+      of main() and init(). The standard log package produces unstructured
+      text output. Go 1.21+ includes log/slog for structured logging.
+    descriptions:
+      business: >
+        This code uses Go's legacy logging system, which produces plain
+        text that monitoring tools struggle to parse. Think of it like
+        handwriting receipts instead of using a point-of-sale system —
+        the information is there, but you cannot run reports on it. As
+        your service grows, these unstructured logs become increasingly
+        useless for diagnosing production issues, costing your team time
+        during every incident.
+      developer: >
+        log.Println/Printf/Print was used instead of log/slog (Go 1.21+).
+        What happens is the output is plain text with a timestamp prefix
+        and no severity, no structured fields, and no way to attach
+        request context. The correct pattern is using slog.Info() with
+        structured key-value pairs — it is in the standard library as of
+        Go 1.21 and is a straightforward migration from the old log
+        package.
+    rationale: >
+      The standard log package writes plain text lines with a timestamp
+      prefix. This output can't be parsed by log aggregation tools without
+      custom regex rules that break whenever the message format changes.
+      There's no severity level (everything is "info"), no structured
+      fields, and no way to attach request context. Go 1.21 introduced
+      log/slog in the standard library specifically to address these
+      limitations. For services that aren't yet on Go 1.21+, zap and
+      zerolog provide the same capabilities. There's no reason to use the
+      old log package in service code anymore — it exists for backward
+      compatibility and simple CLI tools.
+    severity: info
+    tags: [logging, structured, modernization]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: log.Println(...)
+              - pattern: log.Printf(...)
+              - pattern: log.Print(...)
+          - pattern-not-inside: |
+              func main() { ... }
+          - pattern-not-inside: |
+              func init() { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Replace log.Print/Println/Printf with slog.Info() and structured fields.
+      example: |
+        // Before — unstructured, no severity, no fields
+        log.Printf("connecting to database at %s", dbHost)
+
+        // After — structured, leveled, queryable
+        slog.Info("connecting to database",
+            "host", dbHost,
+            "port", dbPort,
+        )
+    references:
+      - https://pkg.go.dev/log/slog
+      - https://go.dev/blog/slog
+      - https://pkg.go.dev/log
+
+  # ── Context-aware logging ──────────────────────────────────────
+
+  - id: go-log-no-context
+    name: slog call without context in context-aware function
+    description: >
+      Flags usage of slog.Info(), slog.Error(), or slog.Warn() (non-context
+      variants) inside functions that accept a context.Context parameter.
+      The context-aware variants slog.InfoContext(ctx, ...) should be used
+      instead.
+    descriptions:
+      business: >
+        This code writes log entries that are disconnected from the
+        request that triggered them. Think of it like a call center where
+        agents take notes on loose paper instead of in the customer's
+        file — when you need to trace what happened for a specific
+        customer request, you cannot connect the dots. Without this fix,
+        incident response takes much longer because engineers cannot
+        correlate logs with traces and requests.
+      developer: >
+        slog.Info/Error/Warn was called instead of the context-aware
+        variant (slog.InfoContext, etc.) in a function that already has
+        a context.Context parameter. What happens is trace IDs, request
+        IDs, and correlation tokens in the context are discarded — the
+        log handler never sees them. The correct pattern is always using
+        slog.InfoContext(ctx, ...) so the handler can automatically
+        attach correlation data to every log line.
+    rationale: >
+      Go 1.21's slog package provides context-aware variants —
+      slog.InfoContext(ctx, ...), slog.ErrorContext(ctx, ...) — that pass
+      the context to the log handler. This enables log handlers to extract
+      trace IDs, request IDs, and correlation tokens from the context and
+      automatically attach them to every log line. Without this, you have
+      to manually add trace_id and request_id fields to every log call,
+      which is tedious, error-prone, and inevitably inconsistent. When a
+      function already has a context.Context parameter, using the non-context
+      slog variant means you're discarding correlation data that's already
+      available. This makes it impossible to correlate logs with traces
+      during incident response — the exact moment when you need it most.
+    severity: info
+    tags: [logging, context, tracing]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: slog.Info(...)
+              - pattern: slog.Error(...)
+              - pattern: slog.Warn(...)
+          - pattern-inside: |
+              func $F(..., $CTX context.Context, ...) (...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use slog.InfoContext(ctx, ...) instead of slog.Info(...) to propagate trace/request IDs.
+      example: |
+        // Before — context available but not passed to logger
+        func (s *Service) ProcessOrder(ctx context.Context, id string) error {
+            slog.Info("processing order", "order_id", id)
+            // ...
+        }
+
+        // After — context flows to log handler for trace correlation
+        func (s *Service) ProcessOrder(ctx context.Context, id string) error {
+            slog.InfoContext(ctx, "processing order", "order_id", id)
+            // ...
+        }
+    references:
+      - https://pkg.go.dev/log/slog#InfoContext
+      - https://go.dev/blog/slog
+      - https://opentelemetry.io/docs/languages/go/instrumentation/#log-correlation

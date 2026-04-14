@@ -1,0 +1,591 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ts-security
+  name: TypeScript Security
+  version: 0.1.0
+  description: >
+    Principal-level security hardening rules for TypeScript services.
+    Catches XSS vectors, injection vulnerabilities, authentication
+    bypasses, and cryptographic misuse that lead to security incidents.
+  descriptions:
+    business: >
+      Your team ships TypeScript services that handle user data, sessions,
+      and credentials. This pack catches the security mistakes that lead
+      to data breaches, account takeovers, and compliance violations —
+      the kind of incidents that make the news, trigger mandatory
+      disclosure, and erode customer trust. These are not theoretical
+      risks; they are the exact patterns attackers exploit.
+    developer: >
+      TypeScript gives you type safety but not security safety. These
+      rules catch injection vectors (XSS, SQL, command, path traversal),
+      authentication bypasses (JWT decode vs verify, hardcoded secrets),
+      and transport security gaps (disabled TLS, missing cookie flags).
+      Each rule maps to a specific OWASP category and prevents a concrete
+      exploit pattern — not style nits, real attack surface.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-security.yaml
+  tags:
+    language: typescript
+    category: security
+    architecture: [services, workers, libraries]
+
+rules:
+  # ── Injection ──────────────────────────────────────────────────
+
+  - id: ts-sec-eval
+    name: Dynamic code execution via eval
+    description: >
+      Flags usage of eval(), new Function(), or setTimeout/setInterval
+      with string arguments. These execute arbitrary code and are the
+      primary code injection vector in JavaScript/TypeScript.
+    descriptions:
+      business: >
+        This code can execute arbitrary instructions from untrusted input.
+        Think of it like giving a stranger the keys to your server room.
+        If any user-provided data reaches this code, an attacker can read
+        your database, steal credentials, and compromise your entire
+        infrastructure. This is the number one cause of remote code
+        execution breaches.
+      developer: >
+        eval() or new Function() was used, which compiles and executes
+        arbitrary strings as code. If any part of the string is
+        user-controlled, it's a remote code execution vulnerability.
+        setTimeout/setInterval with string arguments have the same
+        behavior. Use JSON.parse() for data, proper parsers for
+        expressions, and function references for callbacks.
+    rationale: >
+      eval() and new Function() compile and execute arbitrary strings as
+      code. If any part of the string comes from user input, an attacker
+      can execute arbitrary code in your Node.js process — reading files,
+      making network requests, or compromising the entire server.
+      setTimeout/setInterval with string arguments have the same behavior.
+      This is OWASP A03:2021 — Injection.
+    severity: error
+    tags: [security, injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: eval(...)
+          - pattern: new Function(...)
+          - pattern: setTimeout($STR, ...)
+          - pattern: setInterval($STR, ...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Remove eval() and new Function(). Use proper parsing, configuration, or a safe sandbox.
+      example: |
+        // Before — code injection
+        const result = eval(userInput);
+        const fn = new Function("return " + expr);
+
+        // After — safe alternatives
+        const result = JSON.parse(userInput);
+        const fn = safeExpressionParser(expr);
+    references:
+      - https://owasp.org/Top10/A03_2021-Injection/
+      - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval#never_use_eval!
+
+  - id: ts-sec-inner-html
+    name: Dynamic innerHTML assignment
+    description: >
+      Flags assignment to innerHTML or outerHTML with dynamic values.
+      This is the primary XSS vector in frontend TypeScript code.
+    descriptions:
+      business: >
+        This code could let an attacker inject malicious scripts into your
+        web pages. Think of it like letting a stranger put up signs inside
+        your store — they can redirect customers, steal credit card info,
+        or impersonate your brand. Every visitor to the affected page
+        becomes a potential victim, and a single XSS exploit can lead to
+        mass credential theft.
+      developer: >
+        innerHTML was assigned a dynamic value. innerHTML parses the string
+        as HTML, including script tags and event handlers. If any
+        user-controlled data reaches this assignment, it's a stored or
+        reflected XSS vulnerability. Use textContent for text, or a
+        framework's template system which auto-escapes by default.
+    rationale: >
+      innerHTML parses the assigned string as HTML, including script tags
+      and event handlers. If any user-controlled data reaches innerHTML,
+      an attacker can inject arbitrary JavaScript that runs in every
+      visitor's browser — stealing sessions, credentials, and PII.
+      Use textContent for text, or a framework's template system which
+      auto-escapes. This is OWASP A03:2021 — Injection (XSS).
+    severity: error
+    tags: [security, xss, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: $EL.innerHTML = $VAL
+          - pattern: $EL.outerHTML = $VAL
+          - pattern: document.write(...)
+          - pattern: document.writeln(...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Use textContent for text, or a framework's template system for HTML.
+      example: |
+        // Before — XSS
+        element.innerHTML = userInput;
+
+        // After
+        element.textContent = userInput;
+    references:
+      - https://owasp.org/www-community/attacks/xss/
+      - https://developer.mozilla.org/en-US/docs/Web/API/Element/innerHTML#security_considerations
+
+  - id: ts-sec-sql-injection
+    name: SQL query built with template literals
+    description: >
+      Flags SQL queries built with template literals or string
+      concatenation. Use parameterized queries.
+    descriptions:
+      business: >
+        This code builds database queries by pasting user input directly
+        into the command. Think of it like writing a blank check and letting
+        someone else fill in the amount. An attacker can read your entire
+        database, delete data, or bypass authentication — SQL injection
+        has been the cause of some of the largest data breaches in history.
+      developer: >
+        A SQL query is built using template literals or string concatenation
+        with a variable. Even if the variable seems safe today, any future
+        code change that passes user input creates an injection point.
+        Use parameterized queries ($1, ?) which separate query structure
+        from data at the protocol level, making injection impossible.
+    rationale: >
+      Template literals in SQL queries allow an attacker to inject
+      arbitrary SQL. Even if the variable appears safe today, any
+      future code change that passes user input to that variable
+      creates an injection point. Parameterized queries separate
+      query structure from data at the protocol level, making
+      injection impossible.
+    severity: error
+    tags: [security, sql-injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: $DB.query(`...${$VAR}...`)
+          - pattern: $DB.query("..." + $VAR + "...")
+          - pattern: $POOL.query(`...${$VAR}...`)
+          - pattern: $POOL.query("..." + $VAR + "...")
+          - pattern: $KNEX.raw(`...${$VAR}...`)
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Use parameterized queries with placeholder arguments.
+      example: |
+        // Before — SQL injection
+        await db.query(`SELECT * FROM users WHERE id = ${userId}`);
+
+        // After — parameterized
+        await db.query("SELECT * FROM users WHERE id = $1", [userId]);
+    references:
+      - https://owasp.org/Top10/A03_2021-Injection/
+      - https://node-postgres.com/features/queries#parameterized-query
+
+  - id: ts-sec-command-injection
+    name: Shell command execution with dynamic input
+    description: >
+      Flags exec() or execSync() from child_process with template
+      literals or string concatenation. Command injection vector.
+    descriptions:
+      business: >
+        This code runs operating system commands with user-provided data
+        mixed in. Think of it like letting a customer dictate instructions
+        to your warehouse team verbatim — they could say "ship the order
+        AND open the safe." An attacker can chain arbitrary system commands,
+        gaining full control of your server, reading files, and
+        exfiltrating data.
+      developer: >
+        exec() or execSync() was called with template literals or string
+        concatenation. exec() runs through a shell that interprets
+        metacharacters like ;, |, &&, and backticks. If any part of the
+        string is user-controlled, it's a command injection vulnerability.
+        Use execFile() or spawn() which bypass the shell and pass arguments
+        as an array.
+    rationale: >
+      child_process.exec() runs commands through a shell, interpreting
+      metacharacters like ;, |, &&, and backticks. If any part of the
+      command string comes from user input, an attacker can chain
+      arbitrary commands. Use execFile() or spawn() which bypass the
+      shell and pass arguments as an array.
+    severity: error
+    tags: [security, command-injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: exec(`...${$VAR}...`)
+          - pattern: exec("..." + $VAR + "...")
+          - pattern: execSync(`...${$VAR}...`)
+          - pattern: execSync("..." + $VAR + "...")
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Use execFile() or spawn() with argument arrays instead of exec() with string interpolation.
+      example: |
+        // Before — command injection
+        exec(`convert ${inputFile} output.png`);
+
+        // After — no shell interpretation
+        execFile("convert", [inputFile, "output.png"]);
+    references:
+      - https://owasp.org/Top10/A03_2021-Injection/
+      - https://nodejs.org/api/child_process.html#child_processexecfilefile-args-options-callback
+
+  - id: ts-sec-path-traversal
+    name: User input in file path
+    description: >
+      Flags path.join or fs operations where request parameters could
+      reach the file path without sanitization.
+    descriptions:
+      business: >
+        This code lets user input influence which files the server reads.
+        Think of it like a library where patrons can request any book by
+        writing their own call number — including the ones in the locked
+        archives. An attacker can use "../" sequences to read environment
+        files, private keys, or source code from anywhere on the server.
+      developer: >
+        Request parameters are used in path.join() or fs operations without
+        validation. path.join() resolves "../" but does NOT prevent
+        traversal outside the intended directory. Always use path.resolve()
+        and verify the result starts with the intended base directory via
+        startsWith() before performing any file operation.
+    rationale: >
+      If user input reaches path.join or fs.readFile without sanitization,
+      an attacker can use ../ sequences to read any file the process has
+      access to — environment files, private keys, source code. path.join
+      resolves ../ but does NOT prevent traversal outside the intended
+      directory. Validate that the resolved path starts with the intended
+      base directory.
+    severity: error
+    tags: [security, path-traversal, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: fs.readFile(path.join(..., $REQ.$FIELD, ...), ...)
+          - pattern: fs.readFileSync(path.join(..., $REQ.$FIELD, ...))
+          - pattern: fs.readFile(path.join(..., $REQ.params.$PARAM, ...), ...)
+          - pattern: fs.readFileSync(path.join(..., $REQ.query.$PARAM, ...))
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Validate that the resolved path starts with the intended base directory using path.resolve and startsWith.
+      example: |
+        // Before — path traversal
+        const filePath = path.join("/uploads", req.params.filename);
+        const data = fs.readFileSync(filePath);
+
+        // After — validated base directory
+        const safePath = path.resolve("/uploads", req.params.filename);
+        if (!safePath.startsWith("/uploads/")) {
+            return res.status(403).send("Forbidden");
+        }
+        const data = fs.readFileSync(safePath);
+    references:
+      - https://owasp.org/www-community/attacks/Path_Traversal
+
+  # ── Authentication ─────────────────────────────────────────────
+
+  - id: ts-sec-jwt-decode-no-verify
+    name: JWT decoded without verification
+    description: >
+      Flags jwt.decode() usage. decode() does NOT verify the signature.
+      Use jwt.verify() instead.
+    descriptions:
+      business: >
+        This code accepts identity tokens without checking if they're
+        genuine. Think of it like accepting a handwritten ID without
+        checking the hologram. An attacker can craft a token claiming to
+        be any user — including admin — and your application will trust
+        it completely. This is a direct path to full account takeover.
+      developer: >
+        jwt.decode() was used instead of jwt.verify(). decode() only
+        base64-decodes the payload without checking the cryptographic
+        signature. An attacker can craft a token with arbitrary claims
+        (admin: true, userId: anything) and it will be accepted. Always
+        use jwt.verify() which validates the signature against your secret
+        or public key.
+    rationale: >
+      jwt.decode() is explicitly documented as NOT verifying the token.
+      It only base64-decodes the payload. An attacker can craft a token
+      with any claims (admin: true, userId: anything) and your code
+      will accept it. jwt.verify() checks the cryptographic signature,
+      ensuring the token was issued by your server.
+    severity: error
+    tags: [security, jwt, authentication]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: jwt.decode(...)
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Use jwt.verify() instead of jwt.decode() to verify the token signature.
+      example: |
+        // Before — signature not checked, anyone can forge tokens
+        const payload = jwt.decode(token);
+
+        // After — signature verified
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+    references:
+      - https://www.npmjs.com/package/jsonwebtoken#jwtdecodetoken--options
+
+  - id: ts-sec-hardcoded-secret
+    name: Hardcoded secret in JWT signing
+    description: >
+      Flags JWT signing operations where the secret is a string literal.
+    descriptions:
+      business: >
+        This code has a cryptographic secret written directly in the source
+        code. Anyone with repository access can forge valid authentication
+        tokens and impersonate any user, including administrators. The
+        secret lives in git history forever, so even rotating it doesn't
+        eliminate the risk from past exposure.
+      developer: >
+        A JWT secret is hardcoded as a string literal in jwt.sign() or
+        jwt.verify(). Anyone with repo access can forge tokens. The secret
+        persists in git history even after removal. Load JWT secrets from
+        environment variables or a secret management service and rotate
+        them regularly.
+    rationale: >
+      A hardcoded JWT secret means anyone with repository access can
+      forge valid tokens. The secret lives in git history forever. Use
+      environment variables or a secret management service.
+    severity: error
+    tags: [security, jwt, secrets]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: jwt.sign($PAYLOAD, "...")
+          - pattern: jwt.sign($PAYLOAD, "...", ...)
+          - pattern: jwt.verify($TOKEN, "...")
+          - pattern: jwt.verify($TOKEN, "...", ...)
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Load JWT secrets from environment variables or a secret store.
+      example: |
+        // Before — secret in source code
+        const token = jwt.sign(payload, "my-secret-key");
+
+        // After
+        const token = jwt.sign(payload, process.env.JWT_SECRET!);
+    references:
+      - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens
+
+  # ── HTTP Security ──────────────────────────────────────────────
+
+  - id: ts-sec-cors-wildcard
+    name: CORS wildcard origin
+    description: >
+      Flags CORS configuration with wildcard "*" or origin: true.
+    descriptions:
+      business: >
+        This code allows any website on the internet to make requests to
+        your API on behalf of your users. Think of it like telling your
+        bank "accept instructions from anyone who calls." An attacker's
+        website can make authenticated requests and read responses, enabling
+        full account takeover through the user's browser.
+      developer: >
+        CORS is configured with origin "*" or origin: true, allowing any
+        domain to make cross-origin requests. Combined with credentials:
+        true, this enables cross-site request forgery — an attacker's page
+        can make authenticated requests and read responses. Restrict origins
+        to specific trusted domains that legitimately need API access.
+    rationale: >
+      origin: "*" or origin: true allows any website to make cross-origin
+      requests to your API. If combined with credentials: true, an
+      attacker's website can make authenticated requests and read
+      responses, enabling full account takeover via CSRF.
+    severity: warning
+    tags: [security, cors, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: "cors({ ..., origin: \"*\", ... })"
+          - pattern: "cors({ ..., origin: true, ... })"
+          - pattern: '$RES.header("Access-Control-Allow-Origin", "*")'
+          - pattern: '$RES.set("Access-Control-Allow-Origin", "*")'
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Restrict CORS origins to specific trusted domains.
+      example: |
+        // Before
+        app.use(cors({ origin: "*" }));
+
+        // After
+        app.use(cors({ origin: ["https://app.example.com"] }));
+    references:
+      - https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny
+
+  - id: ts-sec-cookie-no-flags
+    name: Cookie without security flags
+    description: >
+      Flags cookies set without httpOnly flag. Cookies are accessible
+      to JavaScript and vulnerable to XSS theft.
+    descriptions:
+      business: >
+        This code sets a cookie without the security flags that protect it
+        from theft. Think of it like putting your house key under the mat
+        without a lock box. If any XSS vulnerability exists on your site,
+        an attacker's script can steal session cookies and hijack user
+        accounts — accessing their data and acting on their behalf.
+      developer: >
+        A cookie was set without the httpOnly flag. Without httpOnly, any
+        XSS can steal the cookie via document.cookie. Without secure,
+        cookies are sent over plain HTTP. Without sameSite, cookies are
+        sent on cross-origin requests. Always set all three flags
+        (httpOnly, secure, sameSite) on authentication cookies.
+    rationale: >
+      Without httpOnly, XSS allows attackers to steal session cookies.
+      Without secure, cookies are sent over plain HTTP. Without sameSite,
+      cookies are sent on cross-origin requests. All three flags must be
+      set on authentication cookies.
+    severity: warning
+    tags: [security, cookies, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: $RES.cookie($NAME, $VAL, {...})
+          - pattern-not: "$RES.cookie($NAME, $VAL, {..., httpOnly: true, ...})"
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Set httpOnly, secure, and sameSite flags on cookies.
+      example: |
+        // Before
+        res.cookie("session", token, { maxAge: 3600000 });
+
+        // After
+        res.cookie("session", token, {
+            httpOnly: true,
+            secure: true,
+            sameSite: "strict",
+            maxAge: 3600000,
+        });
+    references:
+      - https://owasp.org/www-community/HttpOnly
+      - https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies
+
+  # ── Cryptography ───────────────────────────────────────────────
+
+  - id: ts-sec-weak-crypto
+    name: Weak hash algorithm
+    description: >
+      Flags createHash('md5') or createHash('sha1') usage. These
+      algorithms are cryptographically broken.
+    descriptions:
+      business: >
+        This code uses outdated encryption that has been publicly broken.
+        Think of it like using a lock that thieves can pick in seconds.
+        If used for password hashing or data integrity, an attacker can
+        forge matching hashes, bypass verification, or crack passwords
+        at scale. Security auditors and compliance frameworks flag this
+        as a mandatory fix.
+      developer: >
+        createHash('md5') or createHash('sha1') was used. Both algorithms
+        have practical collision attacks. MD5 is only acceptable for
+        non-security checksums (e.g., cache keys). Use sha256+ for
+        integrity verification and bcrypt or argon2 for password hashing.
+    rationale: >
+      MD5 and SHA1 have practical collision attacks. Using them for
+      password hashing, token generation, or integrity verification
+      is insecure. Use sha256+ for integrity, bcrypt/argon2 for
+      passwords. MD5 is only acceptable for non-security checksums.
+    severity: warning
+    tags: [security, cryptography]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: createHash("md5")
+          - pattern: createHash('md5')
+          - pattern: createHash("sha1")
+          - pattern: createHash('sha1')
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Use createHash('sha256') for integrity. Use bcrypt or argon2 for passwords.
+      example: |
+        // Before
+        const hash = createHash("md5").update(data).digest("hex");
+
+        // After
+        const hash = createHash("sha256").update(data).digest("hex");
+    references:
+      - https://nodejs.org/api/crypto.html#cryptocreatehashalgorithm-options
+      - https://shattered.io/
+
+  - id: ts-sec-ssl-reject-unauthorized
+    name: TLS certificate verification disabled
+    description: >
+      Flags NODE_TLS_REJECT_UNAUTHORIZED set to "0" or rejectUnauthorized
+      set to false. Disables TLS certificate verification.
+    descriptions:
+      business: >
+        This code disables the security check that ensures your service is
+        talking to the real server and not an impersonator. Think of it
+        like making a phone call to your bank but not verifying it's
+        actually the bank on the other end. An attacker on the network
+        can intercept all traffic — including credentials, customer data,
+        and API keys — and modify data in transit without detection.
+      developer: >
+        TLS certificate verification was disabled via
+        NODE_TLS_REJECT_UNAUTHORIZED=0 or rejectUnauthorized: false. This
+        allows man-in-the-middle attacks on all HTTPS traffic from this
+        process. This is typically a dev "fix" for self-signed certs that
+        ships to production. Fix the certificate chain or configure a
+        proper CA bundle instead.
+    rationale: >
+      Disabling certificate verification allows man-in-the-middle attacks.
+      An attacker on the network can intercept all HTTPS traffic, read
+      request/response bodies (including credentials), and modify data
+      in transit. This is commonly added as a "fix" for self-signed certs
+      in development and accidentally shipped to production.
+    severity: error
+    tags: [security, tls]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+          - pattern: "process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'"
+          - pattern: "{..., rejectUnauthorized: false, ...}"
+    applies_to: ["**/*.ts"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Fix the certificate chain instead of disabling verification. Use a proper CA bundle.
+      example: |
+        // Before — MITM vulnerable
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
+        // After — proper CA configuration
+        const agent = new https.Agent({
+            ca: fs.readFileSync("/path/to/ca-cert.pem"),
+        });
+    references:
+      - https://nodejs.org/api/tls.html#tlscreatesecurecontextoptions

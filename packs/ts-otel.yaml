@@ -1,0 +1,784 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ts-otel
+  name: TypeScript OpenTelemetry
+  version: 0.1.0
+  description: >
+    Principal-level OpenTelemetry instrumentation rules for TypeScript
+    services. Catches trace propagation breaks, span lifecycle errors,
+    missing error recording, and observability anti-patterns in Node.js
+    and browser applications.
+  descriptions:
+    business: >
+      Your team invested in OpenTelemetry so you can see exactly what's
+      happening across your services when something goes wrong. This pack
+      catches instrumentation mistakes that silently break your tracing
+      data — leaving your dashboards incomplete and your engineers blind
+      during outages. Without these checks, you're paying for observability
+      tooling but not getting the visibility you need to reduce downtime.
+    developer: >
+      OpenTelemetry gives you distributed tracing, but the JS SDK has
+      sharp edges around span lifecycle, context propagation, and error
+      recording. These rules enforce patterns that prevent silent data
+      loss: spans that never end, errors that never get recorded, context
+      that breaks across async boundaries. If you've ever stared at a
+      Jaeger trace wondering why a span is missing, these rules catch the
+      cause at code review time.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-otel.yaml
+  tags:
+    language: typescript
+    vendor: opentelemetry
+    category: observability
+    architecture: [services, workers]
+
+rules:
+  # ── Span lifecycle ───────────────────────────────────────────
+
+  - id: ts-otel-span-not-ended
+    name: Span created but never ended
+    description: >
+      Flags spans created via tracer.startSpan() or tracer.startActiveSpan()
+      that are not followed by a corresponding span.end() call within the
+      same function or callback body.
+    descriptions:
+      business: >
+        This code creates a tracking checkpoint but never closes it. Think
+        of it like opening a stopwatch and never pressing stop — your
+        performance dashboards show garbage data, memory usage climbs over
+        time, and engineers can't diagnose slowdowns during outages because
+        the tracing data is incomplete.
+      developer: >
+        A span was started via startSpan() or startActiveSpan() but never
+        ended. The OTel JS SDK keeps the span object referenced in the
+        active context indefinitely, its data never reaches the exporter,
+        and parent span durations become meaningless. The correct pattern
+        is always calling span.end() in a finally block.
+    rationale: >
+      An un-ended span is a resource leak in the OTel JS SDK. The span
+      object stays referenced in the active context, its data is never
+      flushed to the SpanProcessor/Exporter pipeline, and the parent
+      span's duration becomes meaningless because it includes a child
+      that never finished. In a long-running Node.js service this
+      silently inflates memory usage and produces incomplete traces that
+      make Jaeger/Tempo/Honeycomb dashboards unreliable. The canonical
+      pattern is to always call span.end() in a finally block (for
+      startSpan) or let startActiveSpan's callback handle it. Every
+      un-ended span is a ticking time bomb for your observability data.
+    severity: error
+    tags: [tracing, span-lifecycle, resource-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - patterns:
+              - pattern: |
+                  $SPAN = $TRACER.startSpan(...)
+              - pattern-not-inside: |
+                  $SPAN = $TRACER.startSpan(...)
+                  ...
+                  $SPAN.end(...)
+          - patterns:
+              - pattern: |
+                  const $SPAN = $TRACER.startSpan(...)
+              - pattern-not-inside: |
+                  const $SPAN = $TRACER.startSpan(...)
+                  ...
+                  $SPAN.end(...)
+          - patterns:
+              - pattern: |
+                  let $SPAN = $TRACER.startSpan(...)
+              - pattern-not-inside: |
+                  let $SPAN = $TRACER.startSpan(...)
+                  ...
+                  $SPAN.end(...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Add span.end() in a finally block immediately after startSpan(), or use startActiveSpan() with a callback that calls span.end().
+      example: |
+        // Before
+        const span = tracer.startSpan("processOrder");
+        doWork();
+        // span.end() never called — resource leak
+
+        // After
+        const span = tracer.startSpan("processOrder");
+        try {
+          doWork();
+        } finally {
+          span.end();
+        }
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#create-spans
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.Span.html#end
+
+  - id: ts-otel-discarded-span
+    name: startActiveSpan callback ignores span parameter
+    description: >
+      Flags tracer.startActiveSpan() calls where the callback does not
+      accept the span parameter. The span handle is needed to record
+      errors, set attributes, set status, and end the span.
+    descriptions:
+      business: >
+        This instrumentation creates the illusion of observability without
+        the substance. The code starts tracking an operation but throws
+        away the handle needed to attach error details and metadata. Your
+        team sees a span in the dashboard that always looks "successful"
+        regardless of what actually happened — hiding real failures from
+        your incident responders.
+      developer: >
+        startActiveSpan() was called but the callback omits the span
+        parameter, so there's no way to call recordException(), setStatus(),
+        or setAttributes(). The span auto-ends on callback return but
+        carries zero metadata. Either accept the span parameter and use it,
+        or remove the startActiveSpan() call entirely — an empty span is
+        worse than no span because it creates false coverage.
+    rationale: >
+      startActiveSpan() sets the span as active in the current context
+      and passes it to the callback. If your callback signature omits the
+      span parameter — e.g., tracer.startActiveSpan("op", () => { ... })
+      — you lose the ability to record errors, set attributes, or mark
+      the span as failed. The span will auto-end when the callback
+      returns, but it will appear in your trace backend as a silent
+      success with zero metadata. This is worse than having no span at
+      all because it creates a false sense of coverage. If the span truly
+      carries no value, remove the startActiveSpan call entirely rather
+      than discarding the handle.
+    severity: warning
+    tags: [tracing, span-lifecycle]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: $TRACER.startActiveSpan("...", () => { ... })
+          - pattern: $TRACER.startActiveSpan("...", async () => { ... })
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Accept the span parameter in the callback to record errors, set attributes, and control the span lifecycle.
+      example: |
+        // Before — span handle discarded, no metadata possible
+        tracer.startActiveSpan("handleRequest", () => {
+          return processRequest();
+        });
+
+        // After — span available for error recording and status
+        tracer.startActiveSpan("handleRequest", (span) => {
+          try {
+            return processRequest();
+          } catch (error) {
+            span.recordException(error);
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            throw error;
+          } finally {
+            span.end();
+          }
+        });
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#create-spans
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.Tracer.html#startActiveSpan
+
+  # ── Error handling ───────────────────────────────────────────
+
+  - id: ts-otel-error-without-record
+    name: Catch block without span.recordException()
+    description: >
+      Flags catch blocks inside traced functions that do not call
+      span.recordException(). The error will be invisible in trace
+      backends like Jaeger, Tempo, or Honeycomb.
+    descriptions:
+      business: >
+        This code catches an error but doesn't report it to your tracing
+        system. Think of it like a security camera that records the hallway
+        but blacks out during break-ins. When an outage happens, your
+        engineers won't see the error in their tracing dashboard and will
+        waste precious minutes digging through logs to find the cause.
+      developer: >
+        A catch block inside a traced function doesn't call
+        span.recordException(). Without it, the exception event with
+        message, type, and stack trace never reaches your trace backend.
+        The correct pattern is always calling span.recordException(error)
+        as the first line of the catch block, before rethrowing.
+    rationale: >
+      recordException() creates an exception event on the span with the
+      error message, type, and stack trace. Without it, your trace
+      backend shows the span but has no idea an error occurred — you have
+      to cross-reference logs to figure out what went wrong. This
+      defeats the purpose of distributed tracing: you want a single pane
+      of glass where clicking a span reveals the exact error. Every
+      principal engineer enforces this pattern because without it,
+      incident responders waste precious minutes correlating logs with
+      traces during outages. In TypeScript, this is especially important
+      because unrecorded exceptions in async handlers are a leading cause
+      of invisible failures in microservice architectures.
+    severity: warning
+    tags: [tracing, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: |
+              catch ($ERR) { ... }
+          - pattern-inside: |
+              $TRACER.startActiveSpan("...", ($SPAN) => { ... })
+          - pattern-not: |
+              catch ($ERR) { ... $SPAN.recordException(...) ... }
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Call span.recordException(error) in the catch block so the error appears in your trace backend.
+      example: |
+        // Before — error invisible in traces
+        tracer.startActiveSpan("fetchUser", async (span) => {
+          try {
+            return await db.getUser(id);
+          } catch (error) {
+            throw error;
+          } finally {
+            span.end();
+          }
+        });
+
+        // After — error appears as span event
+        tracer.startActiveSpan("fetchUser", async (span) => {
+          try {
+            return await db.getUser(id);
+          } catch (error) {
+            span.recordException(error);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+            throw error;
+          } finally {
+            span.end();
+          }
+        });
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#record-exceptions
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.Span.html#recordException
+
+  - id: ts-otel-error-without-set-status
+    name: Catch block without span.setStatus(ERROR)
+    description: >
+      Flags catch blocks inside traced functions that do not call
+      span.setStatus() with SpanStatusCode.ERROR. The span will appear
+      as successful in the trace UI despite an error occurring.
+    descriptions:
+      business: >
+        This code handles an error but marks the operation as "successful"
+        in your monitoring. Your error-rate dashboards, SLO calculations,
+        and alerts all rely on this status flag. Without it, a failing
+        service appears green and healthy while customers experience errors
+        — you'll miss the outage until users start complaining.
+      developer: >
+        recordException() adds an event, but setStatus(ERROR) is what
+        makes the span render as failed in trace UIs. Without it, the span
+        appears green despite an error. Trace backends use span status for
+        error-rate aggregation and the "show me all failed spans" query.
+        Always pair recordException() with setStatus({ code:
+        SpanStatusCode.ERROR }) in the catch block.
+    rationale: >
+      recordException() adds an event, but setStatus({ code:
+      SpanStatusCode.ERROR }) is what makes the span show up as
+      red/failed in your trace UI. Without it, the span appears
+      green/successful even though an error occurred. Trace backends use
+      span status for error-rate calculations, alerting, and the
+      critical "show me all failed spans" query. If you only call
+      recordException without setStatus, the error event exists but the
+      span itself looks healthy — misleading dashboards, missed alerts,
+      and incorrect SLO calculations. In Node.js services handling
+      hundreds of requests per second, this makes the difference between
+      catching an outage in seconds and missing it for hours.
+    severity: warning
+    tags: [tracing, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: |
+              catch ($ERR) { ... }
+          - pattern-inside: |
+              $TRACER.startActiveSpan("...", ($SPAN) => { ... })
+          - pattern-not: |
+              catch ($ERR) { ... $SPAN.setStatus(...) ... }
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: >
+        Call span.setStatus({ code: SpanStatusCode.ERROR, message: error.message })
+        in the catch block.
+      example: |
+        // Before — span appears successful despite error
+        tracer.startActiveSpan("chargePayment", async (span) => {
+          try {
+            await payments.charge(amount);
+          } catch (error) {
+            span.recordException(error);
+            throw error;
+          } finally {
+            span.end();
+          }
+        });
+
+        // After — span correctly marked as failed
+        tracer.startActiveSpan("chargePayment", async (span) => {
+          try {
+            await payments.charge(amount);
+          } catch (error) {
+            span.recordException(error);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+            throw error;
+          } finally {
+            span.end();
+          }
+        });
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#set-span-status
+      - https://open-telemetry.github.io/opentelemetry-js/enums/_opentelemetry_api.SpanStatusCode.html
+
+  - id: ts-otel-end-before-record
+    name: span.end() called before recordException or setStatus
+    description: >
+      Flags code where span.end() is called before span.recordException()
+      or span.setStatus(). Once a span is ended, subsequent calls to
+      modify it are no-ops in the OTel JS SDK.
+    descriptions:
+      business: >
+        This code records an error after the tracking window has already
+        closed — so the error data silently disappears. It's like filing
+        an insurance claim after the policy expired. Your dashboards will
+        show successful operations even though errors occurred, leading to
+        missed outages and incorrect reliability metrics.
+      developer: >
+        span.end() was called before recordException() or setStatus(). Per
+        the OTel spec, a span becomes immutable after end() — all
+        subsequent calls are silently dropped by the SDK with no warning.
+        The correct pattern is always placing span.end() in a finally block
+        as the very last operation on the span.
+    rationale: >
+      The OTel specification states that after end() is called, the span
+      becomes immutable. Any recordException() or setStatus() call after
+      end() is silently dropped by the SDK. This means your error data
+      never reaches the trace backend, and the span appears successful
+      even though an error occurred. This is particularly insidious
+      because the code compiles and runs without any error or warning —
+      the data just disappears. In TypeScript this often happens when
+      developers place span.end() before the catch block or forget that
+      try/catch/finally execution order matters. Always place span.end()
+      in a finally block as the LAST operation on the span.
+    severity: error
+    tags: [tracing, span-lifecycle, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: |
+              $SPAN.end(...)
+              ...
+              $SPAN.recordException(...)
+          - pattern: |
+              $SPAN.end(...)
+              ...
+              $SPAN.setStatus(...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Move span.end() after all recordException/setStatus calls, or use a finally block where span.end() is the last statement.
+      example: |
+        // Before — error data silently dropped
+        const span = tracer.startSpan("processOrder");
+        try {
+          await doWork();
+        } catch (error) {
+          span.end();
+          span.recordException(error);  // no-op, span already ended
+          span.setStatus({ code: SpanStatusCode.ERROR });  // no-op
+        }
+
+        // After — span.end() in finally, runs last
+        const span = tracer.startSpan("processOrder");
+        try {
+          await doWork();
+        } catch (error) {
+          span.recordException(error);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+          throw error;
+        } finally {
+          span.end();
+        }
+    references:
+      - https://opentelemetry.io/docs/specs/otel/trace/api/#end
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.Span.html#end
+
+  - id: ts-otel-missing-finally-end
+    name: Manual span without span.end() in finally block
+    description: >
+      Flags tracer.startSpan() (manual span management) where span.end()
+      is not called inside a finally block. If an exception is thrown
+      before span.end(), the span is never ended.
+    descriptions:
+      business: >
+        This code has a cleanup step that gets skipped whenever an error
+        occurs. Think of it like a cash register that only reconciles on
+        good transactions — any error leaves the register open. Over time,
+        this leaks memory, corrupts your tracing data, and degrades service
+        performance in ways that are hard to diagnose.
+      developer: >
+        span.end() is called after the work but not inside a finally block.
+        If any exception is thrown before that line, the span is never
+        ended — it becomes a resource leak and its data is never exported.
+        This is the TypeScript equivalent of forgetting defer in Go. Always
+        wrap the work in try/finally with span.end() in the finally block.
+    rationale: >
+      Unlike startActiveSpan() with a callback, startSpan() gives you a
+      raw span handle with manual lifecycle management. If you call
+      span.end() at the end of your function but not in a finally block,
+      any exception thrown before that line means the span is never
+      ended — it becomes a resource leak, its data is never exported,
+      and the parent span's duration is corrupted. This is the TypeScript
+      equivalent of forgetting defer in Go. The fix is always the same:
+      wrap the work in try/finally and put span.end() in the finally
+      block. For async code this is even more critical because unhandled
+      promise rejections skip the span.end() call silently.
+    severity: warning
+    tags: [tracing, span-lifecycle]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: |
+              const $SPAN = $TRACER.startSpan(...)
+              ...
+              $SPAN.end(...)
+          - pattern-not-inside: |
+              const $SPAN = $TRACER.startSpan(...)
+              ...
+              try { ... } finally { ... $SPAN.end(...) ... }
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Wrap the span's work in try/finally and move span.end() into the finally block.
+      example: |
+        // Before — exception skips span.end()
+        const span = tracer.startSpan("sendEmail");
+        await emailService.send(to, body);
+        span.end();
+
+        // After — span.end() always called
+        const span = tracer.startSpan("sendEmail");
+        try {
+          await emailService.send(to, body);
+        } finally {
+          span.end();
+        }
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#create-spans
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.Span.html#end
+
+  # ── Dependency injection & testability ───────────────────────
+
+  - id: ts-otel-global-tracer
+    name: Using trace.getTracer() at call site instead of injected tracer
+    description: >
+      Flags direct calls to trace.getTracer() outside of module-level
+      setup or dependency injection bootstrap code. The tracer should be
+      injected as a dependency.
+    descriptions:
+      business: >
+        This code has a hidden dependency on a global tracing system, making
+        it hard to test and easy to break. It's like hardwiring a light
+        switch to a specific breaker panel — moving to a different building
+        means rewiring everything. Untestable code leads to more bugs
+        reaching production and longer time-to-fix during incidents.
+      developer: >
+        trace.getTracer() was called directly at the call site instead of
+        being injected. This couples your code to the global TracerProvider
+        singleton, makes unit testing painful (you have to manipulate
+        globals), and prevents using different providers for different
+        subsystems. Inject the Tracer via constructor or factory function,
+        the same way you'd inject a database client.
+    rationale: >
+      Calling trace.getTracer() directly at the call site couples your
+      code to the global OTel API singleton. This makes unit testing
+      painful because you have to manipulate the global TracerProvider to
+      swap in a test exporter, creates hidden dependencies that aren't
+      visible in constructor signatures, and makes it impossible to use
+      different TracerProviders for different subsystems (e.g., sampling
+      differently for health checks vs business logic). In TypeScript,
+      inject the Tracer into your classes/functions at construction time
+      via constructor injection or factory functions, just like you would
+      a database client or HTTP client. This makes dependencies explicit,
+      enables straightforward mocking in tests, and follows the
+      dependency inversion principle.
+    severity: info
+    tags: [tracing, dependency-injection, testability]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: trace.getTracer(...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Inject the Tracer as a constructor parameter or module-level dependency instead of calling trace.getTracer() at the call site.
+      example: |
+        // Before — hidden global dependency
+        import { trace } from "@opentelemetry/api";
+
+        export class OrderService {
+          async create(order: Order): Promise<void> {
+            const tracer = trace.getTracer("orders");
+            return tracer.startActiveSpan("createOrder", async (span) => {
+              // ...
+              span.end();
+            });
+          }
+        }
+
+        // After — explicit, testable dependency
+        import { Tracer } from "@opentelemetry/api";
+
+        export class OrderService {
+          constructor(private readonly tracer: Tracer) {}
+
+          async create(order: Order): Promise<void> {
+            return this.tracer.startActiveSpan("createOrder", async (span) => {
+              // ...
+              span.end();
+            });
+          }
+        }
+
+        // In composition root:
+        const tracer = trace.getTracer("orders");
+        const service = new OrderService(tracer);
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#acquiring-a-tracer
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.TracerProvider.html
+
+  # ── Naming & conventions ─────────────────────────────────────
+
+  - id: ts-otel-string-literal-span-name
+    name: Inline string literal used as span name
+    description: >
+      Flags span creation where the span name is an inline string literal
+      rather than a named constant. Span names should be constants for
+      consistent trace aggregation.
+    descriptions:
+      business: >
+        This code uses a freeform label for a tracking operation, making it
+        easy for typos to silently split your metrics. Think of it like
+        filing invoices under slightly different names — "OrderProcessing"
+        vs "order-processing" — your reports show incomplete data because
+        the system treats them as separate operations. Dashboards become
+        unreliable and trends get hidden.
+      developer: >
+        An inline string literal is used as a span name. Trace backends
+        aggregate by span name, so typos or inconsistent casing fragment
+        your metrics. Extract span names to module-level constants (e.g.,
+        a spans.ts file) for consistency, IDE rename support, and a single
+        inventory of all instrumented operations.
+    rationale: >
+      Trace backends aggregate spans by name to compute latency
+      percentiles, error rates, and throughput. When span names are
+      inline string literals scattered across the codebase, typos and
+      inconsistent naming (e.g., "getUser" vs "GetUser" vs "get-user")
+      fragment your aggregation and make dashboards unreliable. Defining
+      span names as module-level constants ensures consistency, enables
+      IDE-powered rename refactoring, and makes it trivial to search for
+      all instrumentation points. This is especially critical in
+      TypeScript services with hundreds of spans where a naming typo can
+      hide errors behind an unmonitored span name. Using a constants
+      file (e.g., spans.ts) also gives you a single inventory of all
+      instrumented operations.
+    severity: info
+    tags: [tracing, naming]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: $TRACER.startSpan("...")
+          - pattern: $TRACER.startActiveSpan("...", ...)
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Extract the span name to a module-level const for consistent aggregation and easy refactoring.
+      example: |
+        // Before — inline string, easy to typo
+        tracer.startActiveSpan("processOrder", (span) => { ... });
+
+        // After — constant, searchable, refactorable
+        // spans.ts
+        export const SPAN_PROCESS_ORDER = "OrderService.processOrder" as const;
+
+        // order.service.ts
+        tracer.startActiveSpan(SPAN_PROCESS_ORDER, (span) => { ... });
+    references:
+      - https://opentelemetry.io/docs/specs/otel/trace/api/#span
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#create-spans
+
+  # ── Performance ──────────────────────────────────────────────
+
+  - id: ts-otel-set-attribute-in-loop
+    name: span.setAttribute() called inside a loop
+    description: >
+      Flags calls to span.setAttribute() or span.setAttributes() inside
+      a for, for...of, for...in, or while loop. Attributes should be
+      batched or set once to avoid per-iteration overhead on the hot path.
+    descriptions:
+      business: >
+        This code does unnecessary bookkeeping work on every single item
+        in a loop, slowing down request processing. Think of it like
+        updating a spreadsheet cell-by-cell instead of pasting an entire
+        column at once. In high-traffic services, this adds measurable
+        latency that degrades customer experience under load.
+      developer: >
+        span.setAttribute() is called inside a loop. Each call triggers
+        internal bookkeeping and GC pressure. If the same key is set each
+        iteration, only the last value is kept — making all intermediate
+        calls pure waste. Collect data during the loop and call
+        setAttributes() once after the loop completes with a single object.
+    rationale: >
+      Each setAttribute() call on the span object triggers internal
+      bookkeeping — updating the attributes map, potentially triggering
+      attribute count limit checks, and creating garbage for the GC.
+      In a tight loop processing thousands of items, this adds
+      measurable latency to your Node.js event loop. Worse, if you're
+      setting the same attribute key in each iteration, only the last
+      value is kept — so all the intermediate calls are pure waste.
+      Collect the data you need during the loop, then call
+      setAttributes() once after the loop completes with all key-value
+      pairs in a single object. This is especially important in Node.js
+      where the single-threaded event loop means every microsecond of
+      synchronous work delays all other requests.
+    severity: warning
+    tags: [tracing, performance]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern-either:
+              - pattern: $SPAN.setAttribute(...)
+              - pattern: $SPAN.setAttributes(...)
+          - pattern-inside: |
+              for (...) { ... }
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Collect attributes during the loop and call setAttributes() once after the loop completes.
+      example: |
+        // Before — setAttribute on every iteration
+        for (const item of items) {
+          span.setAttribute("item.id", item.id);
+          await processItem(item);
+        }
+
+        // After — single call with batched data
+        const processedIds: string[] = [];
+        for (const item of items) {
+          await processItem(item);
+          processedIds.push(item.id);
+        }
+        span.setAttributes({
+          "item.count": items.length,
+          "item.ids": processedIds.join(","),
+        });
+    references:
+      - https://opentelemetry.io/docs/languages/js/instrumentation/#span-attributes
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.Span.html#setAttribute
+
+  # ── Context propagation ─────────────────────────────────────
+
+  - id: ts-otel-async-context-loss
+    name: Async callback loses trace context
+    description: >
+      Flags setTimeout, setInterval, or process.nextTick calls inside a
+      traced block (startActiveSpan callback) that do not use
+      context.with() to propagate the active span context. The async
+      callback loses the trace.
+    descriptions:
+      business: >
+        This code schedules work that runs outside of the current tracking
+        context — like a detective handing off a case without the case
+        file. The deferred work creates a new, disconnected trace instead
+        of continuing the existing one. During incidents, engineers see
+        fragmented traces and can't follow the full request path, extending
+        the time to diagnose and resolve outages.
+      developer: >
+        setTimeout/setInterval/process.nextTick was called inside a
+        startActiveSpan callback without context.with(). The callback
+        executes on a future event loop tick, outside the active span
+        context. Any spans created inside it start a new trace instead of
+        continuing the parent. Use context.with(context.active(), ...) to
+        propagate the trace context, or ensure @opentelemetry/context-async-hooks
+        is registered.
+    rationale: >
+      In Node.js, setTimeout, setInterval, and process.nextTick schedule
+      callbacks on a future tick of the event loop. By default, these
+      callbacks execute outside the active span context — any spans
+      created inside them start a new trace instead of continuing the
+      existing one. This is the Node.js equivalent of launching a
+      goroutine without passing context in Go. The result is fragmented
+      traces: your parent span completes, but the deferred work appears
+      as an orphan trace (or doesn't appear at all). To preserve the
+      trace chain, use context.with(trace.setSpan(context.active(),
+      span), () => { ... }) inside the callback, or use the OTel
+      context-async-hooks integration which patches these APIs
+      automatically. Without explicit context propagation, every
+      setTimeout is a potential trace break that makes debugging async
+      failures nearly impossible.
+    severity: warning
+    tags: [tracing, context-propagation, async]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern-either:
+              - pattern: setTimeout(...)
+              - pattern: setInterval(...)
+              - pattern: process.nextTick(...)
+          - pattern-inside: |
+              $TRACER.startActiveSpan("...", ($SPAN) => { ... })
+    applies_to: ["**/*.ts", "**/*.tsx"]
+    excludes: ["**/node_modules/**", "**/dist/**", "**/*.test.ts", "**/*.spec.ts"]
+    fix:
+      message: Use context.with() to propagate the active span context into the async callback, or ensure @opentelemetry/context-async-hooks is registered.
+      example: |
+        // Before — trace context lost in setTimeout
+        tracer.startActiveSpan("processQueue", (span) => {
+          setTimeout(() => {
+            // This runs outside the span context — new trace!
+            processNextBatch();
+          }, 1000);
+          span.end();
+        });
+
+        // After — context explicitly propagated
+        import { context, trace } from "@opentelemetry/api";
+
+        tracer.startActiveSpan("processQueue", (span) => {
+          const currentContext = context.active();
+          setTimeout(() => {
+            context.with(currentContext, () => {
+              // This runs inside the original span context
+              processNextBatch();
+            });
+          }, 1000);
+          span.end();
+        });
+    references:
+      - https://opentelemetry.io/docs/languages/js/context/
+      - https://open-telemetry.github.io/opentelemetry-js/interfaces/_opentelemetry_api.ContextAPI.html#with
+      - https://www.npmjs.com/package/@opentelemetry/context-async-hooks

@@ -1,0 +1,168 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ai-workflow
+  name: AI Workflow Standards
+  version: 0.1.0
+  description: >
+    Repository hygiene rules that matter especially for AI-driven
+    coding workflows — git worktree isolation, default branch
+    protection, and .gitignore hygiene. These are general coding
+    best practices that become critical when autonomous agents
+    are making changes on your behalf.
+  descriptions:
+    business: >
+      AI-driven coding sessions move fast and operate in parallel.
+      Mistakes that would normally be caught by team process can
+      slip through — committing directly to main, working outside
+      an isolated workspace, or forgetting to exclude secrets from
+      version control. This pack provides guardrails that enforce
+      workflow standards automatically, reducing the risk of
+      production incidents caused by process shortcuts.
+    developer: >
+      This pack uses the repocheck capability to verify
+      repository-level state: git worktree isolation, branch
+      naming, and .gitignore patterns. These are checks that
+      operate on repo metadata rather than file content — things
+      you can't catch with a linter but can enforce
+      programmatically.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ai-workflow.yaml
+  tags:
+    category: workflow
+    architecture: [services, workers, pipelines, libraries, serverless]
+
+rules:
+  # ── Git Workflow ──────────────────────────────────────────────
+
+  - id: require-git-worktree
+    name: Require git worktree for isolated work
+    description: >
+      Checks that work is happening inside a linked git worktree rather
+      than directly in the main repository checkout.
+    descriptions:
+      business: >
+        Working directly in the main checkout risks accidental changes to
+        the production branch, merge conflicts with other developers, and
+        lost work if a reset is needed. Git worktrees provide cheap,
+        isolated workspaces that keep the main checkout clean. This is
+        especially important when multiple AI agents may be working on
+        different features concurrently.
+      developer: >
+        This rule compares git rev-parse --git-dir against --git-common-dir.
+        When they differ, you're in a linked worktree. When they're the
+        same, you're in the main checkout and should create a worktree
+        with git worktree add.
+    rationale: >
+      Git worktrees provide isolated working copies that prevent
+      accidental pollution of the main checkout. They're especially
+      important for AI-driven sessions where multiple features may
+      be developed concurrently.
+    severity: warning
+    tags: [git, workflow, isolation]
+    detector:
+      capability: git
+      config:
+        # Compare absolute git-dir against the worktree's "common" dir.
+        # In a linked worktree these differ; in the main checkout they match.
+        argv: [rev-parse, --absolute-git-dir]
+        # Fires when the absolute git-dir does NOT contain "/.git/worktrees/".
+        fire_when: 'not signal.stdout matches "/\\.git/worktrees/"'
+    applies_to: ["**/*"]
+    excludes: ["**/vendor/**", "**/node_modules/**", "**/.git/**"]
+    fix:
+      message: Create a git worktree with 'git worktree add ../worktree-name -b branch-name'.
+      example: |
+        # From the main checkout, create an isolated worktree
+        git worktree add ../feature-work -b feature/my-feature
+
+        # Work in the new directory
+        cd ../feature-work
+    references:
+      - https://git-scm.com/docs/git-worktree
+
+  - id: no-default-branch-commits
+    name: Do not work directly on the default branch
+    description: >
+      Checks that the current branch is not main or master, preventing
+      direct commits to the default branch.
+    descriptions:
+      business: >
+        Direct commits to the default branch bypass code review, CI gates,
+        and approval workflows. A single bad commit can break production
+        for the entire team. Branch protection at the repo level is
+        defense-in-depth; catching it at edit time is faster feedback.
+      developer: >
+        This rule uses git branch --show-current and fires if the branch
+        name matches ^(main|master)$. Create a feature branch before
+        making changes.
+    rationale: >
+      Working on the default branch bypasses pull request workflows,
+      code review, and CI gates. Always create a feature branch, even
+      for small changes.
+    severity: warning
+    tags: [git, workflow, branching]
+    detector:
+      capability: git
+      config:
+        argv: [branch, --show-current]
+        fire_when: 'signal.stdout matches "^(main|master)$"'
+    applies_to: ["**/*"]
+    excludes: ["**/vendor/**", "**/node_modules/**", "**/.git/**"]
+    fix:
+      message: Create a feature branch with 'git checkout -b feature/your-feature'.
+      example: |
+        # Before — working directly on main
+        git branch
+        # * main
+
+        # After — create a feature branch
+        git checkout -b feature/add-auth
+    references:
+      - https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-branches
+
+  # ── Repository Configuration ──────────────────────────────────
+
+  - id: gitignore-env-files
+    name: Ensure .gitignore excludes .env files
+    description: >
+      Checks that the .gitignore file contains a pattern to exclude .env
+      files, preventing accidental commit of secrets and configuration.
+    descriptions:
+      business: >
+        Environment files (.env) contain database passwords, API keys,
+        and service credentials. If committed to git, these secrets are
+        permanently in the repository history and can be extracted by
+        anyone with read access. A single leaked credential can lead to
+        data breaches, unauthorized access, and compliance violations.
+      developer: >
+        This rule checks that .gitignore contains a pattern matching
+        .env files. It uses a regex check, so patterns like .env,
+        .env.local, or .env* all satisfy the rule.
+    rationale: >
+      Environment files contain secrets (API keys, database passwords,
+      service tokens) that must never be committed to version control.
+      A .gitignore entry is the first line of defense against accidental
+      secret exposure.
+    severity: error
+    tags: [security, secrets, config]
+    detector:
+      capability: file-contains
+      config:
+        path: .gitignore
+        pattern: "\\.env"
+        fire_when: 'signal.exit_code != 0'
+    applies_to: ["**/*"]
+    excludes: ["**/vendor/**", "**/node_modules/**", "**/.git/**"]
+    fix:
+      message: Add '.env' to your .gitignore file to prevent committing secrets.
+      example: |
+        # .gitignore — add these lines
+        .env
+        .env.local
+        .env.production
+    references:
+      - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/05-Enumerate_Infrastructure_and_Application_Admin_Interfaces

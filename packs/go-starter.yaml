@@ -1,0 +1,688 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-starter
+  name: Go Starter
+  version: 0.1.0
+  description: >
+    Foundational Go rules covering testing, error handling, logging, and
+    context usage. Everything a Go project needs to stay idiomatic from
+    day one, without requiring team discussion to adopt.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-starter.yaml
+
+rules:
+  # ── Naming conventions ────────────────────────────────────────
+
+  - id: go-no-get-prefix
+    name: Getters should not use Get prefix
+    description: >
+      Flags exported methods named GetX() with no parameters (besides
+      the receiver). In idiomatic Go, getters drop the Get prefix.
+    rationale: >
+      Go convention is Name(), not GetName() — matching the standard
+      library (time.Time.Hour(), not GetHour()). Keeps the API clean.
+    severity: warning
+    tags: [naming, style]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func ($RECV $TYPE) $NAME() $RET { ... }
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: "^Get[A-Z]"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go"]
+    fix:
+      message: Remove the Get prefix from the method name.
+      example: |
+        // Before
+        func (u *User) GetName() string { return u.name }
+        // After
+        func (u *User) Name() string { return u.name }
+    references:
+      - https://go.dev/doc/effective_go#Getters
+
+  - id: go-no-self-this-receiver
+    name: Do not use self or this as receiver name
+    description: >
+      Flags methods whose receiver variable is named "self" or "this".
+    rationale: >
+      Go convention is a short abbreviation of the type name (s for Server,
+      cl for Client). Using self or this signals Java/Python habits and
+      creates inconsistency with the standard library and community code.
+    severity: warning
+    tags: [naming, style]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: |
+              func (self $TYPE) $METHOD(...) { ... }
+          - pattern: |
+              func (this $TYPE) $METHOD(...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use a short abbreviation of the type name as the receiver.
+      example: |
+        // Before
+        func (self *Server) Start() error { ... }
+        // After
+        func (s *Server) Start() error { ... }
+    references:
+      - https://go.dev/wiki/CodeReviewComments#receiver-names
+
+  # ──────────────────────────────────────────────────────────────
+  # Error handling
+  # ──────────────────────────────────────────────────────────────
+
+  - id: go-type-assertion-ok
+    name: Use comma-ok form for type assertions
+    description: >
+      Flags type assertions v.(T) that are not in the safe comma-ok form.
+      Single-value type assertions panic at runtime if the type does not match.
+    rationale: >
+      A bare v.(T) will panic if v does not hold a T. The comma-ok form
+      (v, ok := x.(T)) lets you handle the failure gracefully. LLMs
+      routinely produce the unsafe form when working with interface values.
+    severity: error
+    tags: [errors, safety]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $X.($T)
+          - pattern-not-inside: |
+              $X, $OK := $Y.($T)
+          - pattern-not-inside: |
+              $X, $OK = $Y.($T)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Use the comma-ok form for type assertions.
+      example: |
+        // Before (panics if v is not a string)
+        s := v.(string)
+        // After (safe)
+        s, ok := v.(string)
+        if !ok { return fmt.Errorf("expected string, got %T", v) }
+    references:
+      - https://go.dev/tour/methods/15
+      - https://go.dev/doc/effective_go#interface_conversions
+
+  - id: go-error-string-style
+    name: Error strings must be lowercase with no trailing punctuation
+    description: >
+      Flags error strings passed to errors.New() or fmt.Errorf() that start
+      with a capital letter or end with punctuation (., !, ?).
+    rationale: >
+      Error strings in Go are often composed with fmt.Errorf("doing X: %w", err).
+      If the inner error starts with a capital or ends with a period, the composed
+      message looks broken: "doing X: Connection failed." Go Code Review Comments
+      explicitly requires lowercase, no punctuation.
+    severity: warning
+    tags: [errors, style]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: errors.New("$MSG")
+              - metavariable-regex:
+                  metavariable: $MSG
+                  regex: "^[A-Z]"
+          - patterns:
+              - pattern: fmt.Errorf("$MSG", ...)
+              - metavariable-regex:
+                  metavariable: $MSG
+                  regex: "^[A-Z]"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Start error strings with a lowercase letter and omit trailing punctuation.
+      example: |
+        // Before
+        errors.New("Connection failed.")
+        // After
+        errors.New("connection failed")
+    references:
+      - https://go.dev/wiki/CodeReviewComments#error-strings
+
+  # ── API design ────────────────────────────────────────────────
+
+  - id: go-bool-param-smell
+    name: Exported functions should not accept bool parameters
+    description: >
+      Flags exported functions and methods with bool parameters.
+    rationale: >
+      Boolean parameters create opaque call sites: Process(data, true) tells
+      the reader nothing. Prefer an options struct, a functional option, or
+      two separate functions (ProcessVerbose / Process). Principal engineers
+      flag this in code review consistently.
+    severity: warning
+    tags: [api-design, readability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func $NAME(..., $P bool, ...) { ... }
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: "^[A-Z]"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Replace the bool parameter with an options type or two separate functions.
+      example: |
+        // Before
+        func Process(data string, verbose bool) error { ... }
+        // After
+        func Process(data string) error { ... }
+        func ProcessVerbose(data string) error { ... }
+    references:
+      - https://go.dev/wiki/CodeReviewComments#useful-test-failures
+
+  - id: go-constructor-returns-pointer
+    name: New functions should return pointers
+    description: >
+      Flags New* constructor functions that return a value type rather than
+      a pointer to the constructed type.
+    rationale: >
+      Constructors returning value types prevent the caller from obtaining
+      a nil value to signal absence, force unnecessary copies on assignment,
+      and break interface satisfaction when methods have pointer receivers.
+      The overwhelming convention in the standard library and community is
+      New*() *T.
+    severity: warning
+    tags: [api-design, conventions]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func $FUNC(...) $RET { ... }
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^New[A-Z]"
+          - metavariable-regex:
+              metavariable: $RET
+              regex: "^[A-Z]"
+          - pattern-not: |
+              func $FUNC(...) *$T { ... }
+          - pattern-not: |
+              func $FUNC(...) ($RET, error) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Return a pointer from New* constructors.
+      example: |
+        // Before
+        func NewConfig() Config { return Config{} }
+        // After
+        func NewConfig() *Config { return &Config{} }
+    references:
+      - https://go.dev/doc/effective_go#allocation_new
+
+  - id: go-no-empty-interface
+    name: Avoid empty interface parameters in exported functions
+    description: >
+      Flags exported functions and methods that accept interface{} or any
+      as a parameter type.
+    rationale: >
+      Empty interface defeats Go's type system. LLMs use it as a lazy
+      escape hatch when a proper type would make the API self-documenting.
+      If you need polymorphism, define a named interface with the methods
+      you actually need.
+    severity: warning
+    tags: [api-design, type-safety]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func $NAME(..., $P interface{}, ...) { ... }
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: "^[A-Z]"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use a concrete type or a named interface instead of interface{}/any.
+      example: |
+        // Before
+        func Store(key string, value any) error { ... }
+        // After — define what you actually need
+        type Storable interface { Key() string }
+        func Store(v Storable) error { ... }
+    references:
+      - https://go.dev/doc/effective_go#interfaces
+
+  # ── Code structure ────────────────────────────────────────────
+
+  - id: go-no-util-package
+    name: Avoid generic package names
+    description: >
+      Flags packages named util, utils, helper, helpers, common, misc,
+      shared, or base.
+    rationale: >
+      Generic package names are a code smell: they become grab-bags with
+      no coherent responsibility. Go packages should be named for what they
+      provide to their callers, not for their role in the project structure.
+      A package named "auth" tells you what it does; "utils" tells you nothing.
+    severity: warning
+    tags: [package-design, naming]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          package $PKG
+        metavariable-regex:
+          metavariable: $PKG
+          regex: "^(util|utils|helper|helpers|common|misc|shared|base)$"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Rename the package to reflect what it provides.
+      example: |
+        // Before: package utils
+        // After: package timeutil (if it provides time formatting helpers)
+        // After: package httputil (if it provides HTTP request helpers)
+    references:
+      - https://go.dev/doc/effective_go#package-names
+      - https://go.dev/blog/package-names
+
+  - id: go-no-init-function
+    name: Avoid init functions outside main
+    description: >
+      Flags func init() declarations in non-main, non-test packages.
+    rationale: >
+      init() creates implicit initialization ordering dependencies that are
+      invisible to the caller and make code hard to test in isolation.
+      Prefer an explicit Setup() or New() function that the caller controls.
+    severity: warning
+    tags: [design, testability]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern: |
+          func init() { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go", "**/main.go"]
+    fix:
+      message: Replace init() with an explicit initialization function.
+      example: |
+        // Before
+        func init() { setupDatabase() }
+        // After
+        func Setup() error { return setupDatabase() }
+    references:
+      - https://go.dev/doc/effective_go#init
+
+  - id: go-test-helper-t-helper
+    name: Test helper functions must call t.Helper()
+    description: >
+      Flags test helper functions (non-Test/Benchmark/Example functions
+      accepting *testing.T) that do not call t.Helper().
+    rationale: >
+      Without t.Helper(), test failure line numbers point to the helper
+      function, not the calling test — making failures hard to locate.
+      t.Helper() marks the function as a helper so the testing framework
+      skips it in failure output and shows the caller's line instead.
+      LLMs almost never add t.Helper() to test helpers.
+    severity: warning
+    tags: [testing, diagnostics]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              func $NAME($T *testing.T, ...) { ... }
+          - pattern-not: |
+              func $NAME($T *testing.T, ...) { ... $T.Helper() ... }
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: "^[^T]|^T[^e]|^Te[^s]|^Tes[^t]"
+    applies_to: ["**/*_test.go"]
+    excludes: ["**/vendor/**", "**/gen/**"]
+    fix:
+      message: Add t.Helper() as the first statement in the helper function.
+      example: |
+        // Before
+        func assertNoError(t *testing.T, err error) {
+            if err != nil { t.Fatalf("error: %v", err) }
+        }
+        // After
+        func assertNoError(t *testing.T, err error) {
+            t.Helper()
+            if err != nil { t.Fatalf("error: %v", err) }
+        }
+    references:
+      - https://pkg.go.dev/testing#T.Helper
+      - https://go.dev/blog/subtests
+
+  - id: go-no-global-mutable-state
+    name: Avoid package-level mutable variables
+    description: >
+      Flags mutable package-level var declarations, excluding error sentinels
+      (Err* prefix) and sync primitives.
+    rationale: >
+      Package-level mutable state creates hidden coupling between callers,
+      makes tests order-dependent, and prevents safe concurrent use. Pass
+      state explicitly through function parameters or struct fields.
+      LLMs produce global vars frequently as a shortcut.
+    severity: warning
+    tags: [design, testability, concurrency]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: var $X = $V
+          - metavariable-regex:
+              metavariable: $X
+              regex: "^[^E]|^E[^r]|^Er[^r]"
+          - pattern-not: var $X = sync.Mutex{}
+          - pattern-not: var $X = sync.RWMutex{}
+          - pattern-not: var $X = &sync.Mutex{}
+          - pattern-not: var $X = &sync.RWMutex{}
+          - pattern-not: var $X sync.Mutex
+          - pattern-not: var $X sync.RWMutex
+          - pattern-not: var $X sync.Once
+          - pattern-not: var $X sync.WaitGroup
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go", "**/main.go"]
+    fix:
+      message: Pass state explicitly via function parameters or struct fields.
+      example: |
+        // Before
+        var cache = map[string]string{}
+        func Get(key string) string { return cache[key] }
+        // After
+        type Store struct{ cache map[string]string }
+        func (s *Store) Get(key string) string { return s.cache[key] }
+    references:
+      - https://go.dev/doc/effective_go#init
+
+  - id: go-no-goroutine-in-init
+    name: No goroutines in init functions
+    description: Flags goroutines launched inside init() functions.
+    rationale: |
+      Goroutines spawned in init() run before main and can cause race conditions,
+      non-deterministic startup order, and hard-to-debug hangs.
+    severity: error
+    tags:
+      - concurrency
+      - go
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              go $FUNC(...)
+          - pattern-inside: |
+              func init() { ... }
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Move goroutine startup to main() or a dedicated Start() function.
+      example: |
+        // Before
+        func init() { go worker() }
+        // After
+        func Start() { go worker() }
+
+  - id: go-no-naked-return
+    name: No naked returns in long functions
+    description: Flags bare return statements in functions with named results and non-trivial bodies.
+    rationale: |
+      Naked returns obscure what is being returned, especially in functions longer
+      than a few lines. Explicit returns are clearer and less error-prone.
+    severity: warning
+    tags:
+      - readability
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: nakedret
+        rule: nakedret
+        settings:
+          max-func-lines: 5
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Replace naked return with explicit return values.
+      example: |
+        // Before
+        func calc() (x int) { x = 1; return }
+        // After
+        func calc() (x int) { x = 1; return x }
+
+  - id: go-interface-too-large
+    name: Interface has too many methods
+    description: Flags interfaces with more than 5 methods.
+    rationale: |
+      Large interfaces are hard to implement and mock. Prefer small, focused
+      interfaces that represent a single capability.
+    severity: warning
+    tags:
+      - design
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: interfacebloat
+        rule: interfacebloat
+        settings:
+          max: 5
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Split the interface into smaller, focused interfaces.
+      example: |
+        // Before
+        type Store interface { Get(); Set(); Delete(); List(); Watch(); Sync() }
+        // After
+        type Reader interface { Get(); List() }
+        type Writer interface { Set(); Delete() }
+
+  - id: go-receiver-consistency
+    name: Consistent receiver names
+    description: Flags methods on the same type using different receiver names.
+    rationale: |
+      Inconsistent receiver names within a type make code harder to read and
+      are a common source of copy-paste bugs.
+    severity: warning
+    tags:
+      - naming
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: recvcheck
+        rule: recvcheck
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Use a consistent receiver name for all methods on this type.
+      example: |
+        // Before
+        func (s *Server) Start() {}
+        func (srv *Server) Stop() {}
+        // After
+        func (s *Server) Start() {}
+        func (s *Server) Stop() {}
+
+  - id: go-context-first-param
+    name: Context should be first parameter
+    description: Flags functions that accept context.Context but not as the first parameter.
+    rationale: |
+      Go convention is to pass context as the first parameter. This makes it
+      easy to identify context-aware functions at a glance.
+    severity: warning
+    tags:
+      - context
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: contextcheck
+        rule: contextcheck
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/*_test.go"
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Move context.Context to the first parameter position.
+      example: |
+        // Before
+        func Process(data []byte, ctx context.Context) error {}
+        // After
+        func Process(ctx context.Context, data []byte) error {}
+
+  - id: go-require-error-wrapping
+    name: Wrap errors with %w
+    description: Flags fmt.Errorf calls that use %s or %v for error arguments instead of %w.
+    rationale: |
+      Using %w preserves the error chain so callers can use errors.Is and errors.As.
+      Using %s or %v breaks the chain.
+    severity: warning
+    tags:
+      - errors
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: errorlint
+        rule: errorlint
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Replace %s or %v with %w when wrapping errors in fmt.Errorf.
+      example: |
+        // Before
+        return fmt.Errorf("failed: %v", err)
+        // After
+        return fmt.Errorf("failed: %w", err)
+
+  - id: go-require-doc-comment
+    name: Exported symbols must have doc comments
+    description: Flags exported functions, types, and methods without a godoc comment.
+    rationale: |
+      Exported symbols are part of the public API. Missing documentation makes
+      the package harder to use and prevents godoc from generating useful output.
+    severity: warning
+    tags:
+      - documentation
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: revive
+        rule: exported
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/*_test.go"
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Add a doc comment starting with the symbol name.
+      example: |
+        // Before
+        func ProcessData(d []byte) error {}
+        // After
+        // ProcessData transforms raw bytes into the canonical format.
+        func ProcessData(d []byte) error {}
+
+  - id: go-no-name-stuttering
+    name: No name stuttering
+    description: Flags exported types and functions whose name starts with the package name.
+    rationale: |
+      In Go, package names qualify their exports: users write http.Client, not
+      http.HTTPClient. Repeating the package name in the symbol is redundant.
+    severity: warning
+    tags:
+      - naming
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: revive
+        rule: stutters
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Remove the package name prefix from the exported symbol.
+      example: |
+        // Before (package user)
+        type UserService struct{}
+        // After
+        type Service struct{}
+
+  - id: go-require-test-file
+    name: Every package must have a test file
+    description: Flags Go packages that contain source files but no _test.go file.
+    rationale: |
+      Untested packages accumulate silently. Requiring at least one test file
+      makes the absence of tests visible.
+    severity: error
+    tags:
+      - testing
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: testpackage
+        rule: testpackage
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+      - "**/cmd/**"
+    fix:
+      message: Create a _test.go file in this package.
+      example: |
+        // File: foo_test.go
+        package foo
+        import "testing"
+        func TestPlaceholder(t *testing.T) {}

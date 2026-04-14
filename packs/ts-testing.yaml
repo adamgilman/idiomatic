@@ -1,0 +1,458 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: ts-testing
+  name: TypeScript Testing
+  version: 0.1.0
+  description: >
+    Testing quality rules for TypeScript projects. Catches test
+    anti-patterns, missing assertions, flaky patterns, and focused
+    tests that give false confidence and hide real bugs.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-testing.yaml
+
+rules:
+  # ── Test correctness ───────────────────────────────────────────
+
+  - id: ts-test-no-assertion
+    name: Test without any assertion
+    description: >
+      Flags test or it callbacks that contain no expect() call. A test
+      with no assertion always passes regardless of the code's behavior.
+    descriptions:
+      business: >
+        This test doesn't actually check anything. It runs code but
+        never verifies the result. It shows up as "PASS" in CI but
+        provides zero confidence that the code works. It's worse than
+        no test because it creates a false sense of coverage.
+      developer: >
+        A test/it callback with no expect() call exercises code paths
+        but verifies nothing. Add assertions with expect() to check
+        return values, state changes, thrown errors, or resolved
+        promises.
+    rationale: >
+      Tests without assertions are cargo cult testing — they occupy
+      space in the test file, contribute to coverage metrics, and
+      always pass, but verify nothing. They are actively harmful
+      because they mask missing coverage. Every test should assert
+      at least one observable outcome.
+    severity: warning
+    tags: [testing, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  test("...", $FUNC)
+              - pattern: |
+                  it("...", $FUNC)
+          - pattern-not-inside: |
+              ...
+              expect(...)
+              ...
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Add expect() assertions that verify the code's behavior.
+      example: |
+        // Before — no assertions, always passes
+        test("parses input", () => {
+          parse("hello");
+        });
+
+        // After — verifies behavior
+        test("parses input", () => {
+          const result = parse("hello");
+          expect(result).toEqual({ value: "hello" });
+        });
+    references:
+      - https://jestjs.io/docs/expect
+      - https://vitest.dev/api/expect.html
+
+  - id: ts-test-focused
+    name: Focused test blocks other tests from running
+    description: >
+      Flags describe.only, it.only, and test.only calls. A focused
+      test causes all other tests in the file to be skipped, which
+      means CI passes with most tests not running.
+    descriptions:
+      business: >
+        This .only modifier causes every other test in the file to be
+        silently skipped. CI reports "all tests passed" but most tests
+        didn't run at all. Bugs that those tests would catch go
+        undetected until they reach production.
+      developer: >
+        .only is a debugging tool for running a single test in
+        isolation. When committed, it skips every other test in the
+        file. Most test runners don't fail when .only is present,
+        so this silently reduces coverage. Remove .only before
+        committing or use a pre-commit hook to catch it.
+    rationale: >
+      .only is the most dangerous modifier in test files. It silently
+      skips all other tests, and CI reports success because the one
+      focused test passes. Teams have shipped broken code because a
+      developer forgot to remove .only after debugging. Some teams
+      configure CI to fail if .only appears, but static analysis
+      catches it earlier.
+    severity: error
+    tags: [testing, ci]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: describe.only("...", ...)
+          - pattern: it.only("...", ...)
+          - pattern: test.only("...", ...)
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Remove .only before committing — it causes all other tests to be skipped.
+      example: |
+        // Before — skips all other tests in the file
+        test.only("handles edge case", () => {
+          expect(parse("")).toBeNull();
+        });
+
+        // After — all tests run
+        test("handles edge case", () => {
+          expect(parse("")).toBeNull();
+        });
+    references:
+      - https://jestjs.io/docs/api#testonlyname-fn-timeout
+      - https://vitest.dev/api/#test-only
+
+  - id: ts-test-disabled
+    name: Disabled test should be deleted or fixed
+    description: >
+      Flags describe.skip, it.skip, test.skip, xit, and xdescribe
+      calls. Disabled tests accumulate silently and reduce coverage
+      without anyone noticing.
+    descriptions:
+      business: >
+        Skipped tests silently reduce your test coverage. Over time,
+        skipped tests accumulate until a significant portion of the
+        test suite isn't running. Nobody notices because CI still
+        reports "all tests passed."
+      developer: >
+        .skip, xit, and xdescribe disable tests without removing them.
+        They show up as "skipped" in test output but are easy to miss.
+        If the test is broken, fix it. If the feature was removed,
+        delete the test. If it needs a specific environment, use
+        conditional skipping with a clear message.
+    rationale: >
+      Disabled tests are deferred decisions. Without a clear reason
+      and a plan to re-enable them, they become permanent dead code.
+      A test suite with 20% skipped tests provides 80% coverage but
+      looks like 100% in CI. Regularly audit skipped tests and either
+      fix or delete them.
+    severity: warning
+    tags: [testing, maintenance]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern-either:
+          - pattern: describe.skip("...", ...)
+          - pattern: it.skip("...", ...)
+          - pattern: test.skip("...", ...)
+          - pattern: xit("...", ...)
+          - pattern: xdescribe("...", ...)
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Fix the test, delete it, or add a conditional skip with an explanation.
+      example: |
+        // Before — silently skipped
+        test.skip("validates email format", () => {
+          expect(isValidEmail("test@example.com")).toBe(true);
+        });
+
+        // After — either fix it or delete it
+        test("validates email format", () => {
+          expect(isValidEmail("test@example.com")).toBe(true);
+        });
+    references:
+      - https://jestjs.io/docs/api#testskipname-fn
+      - https://vitest.dev/api/#test-skip
+
+  # ── Async test patterns ────────────────────────────────────────
+
+  - id: ts-test-no-await
+    name: Missing await on async assertion
+    description: >
+      Flags expect().resolves or expect().rejects without await. Without
+      await, the assertion runs but its result is never checked — the
+      test passes regardless of the outcome.
+    descriptions:
+      business: >
+        This test looks like it checks an async operation but actually
+        doesn't wait for the result. The test passes immediately,
+        and any failure in the async operation is silently ignored.
+        Bugs in async code go undetected.
+      developer: >
+        expect(promise).resolves and expect(promise).rejects return a
+        Promise. Without await, the test function returns before the
+        assertion resolves. The assertion may fail, but the test has
+        already passed. Always await async assertions.
+    rationale: >
+      This is one of the most common async testing mistakes. Without
+      await, the expect().resolves chain returns a Promise that nobody
+      awaits. The test completes synchronously (passing), and the
+      Promise resolves or rejects asynchronously (after the test is
+      done). Even if the assertion fails, Jest/Vitest cannot attribute
+      the failure to the test.
+    severity: error
+    tags: [testing, async]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern-either:
+              - pattern: expect(...).resolves.$METHOD(...)
+              - pattern: expect(...).rejects.$METHOD(...)
+          - pattern-not-inside: await expect(...).$CHAIN
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Add await before expect().resolves or expect().rejects.
+      example: |
+        // Before — assertion result is never checked
+        test("fetches data", async () => {
+          expect(fetchData()).resolves.toEqual({ id: 1 });
+        });
+
+        // After — assertion is properly awaited
+        test("fetches data", async () => {
+          await expect(fetchData()).resolves.toEqual({ id: 1 });
+        });
+    references:
+      - https://jestjs.io/docs/expect#resolves
+      - https://vitest.dev/api/expect.html#resolves
+
+  # ── Flaky patterns ────────────────────────────────────────────
+
+  - id: ts-test-hardcoded-timeout
+    name: setTimeout used in test for synchronization
+    description: >
+      Flags setTimeout calls inside test callbacks. Timeout-based
+      synchronization makes tests flaky and slow.
+    descriptions:
+      business: >
+        Tests that use fixed delays are unreliable. They pass on fast
+        machines but randomly fail in CI. Making the delay longer wastes
+        time across every test run. These flaky tests erode trust in the
+        test suite.
+      developer: >
+        setTimeout in tests is a code smell for a timing dependency.
+        Use jest.useFakeTimers() to control time, waitFor() utilities
+        from testing-library, or flush promises explicitly. These
+        approaches are both faster and deterministic.
+    rationale: >
+      setTimeout in tests introduces real wall-clock delays that make
+      tests both slow and flaky. A 500ms timeout wastes half a second
+      per test run and may still fail on a loaded CI runner. Fake timers
+      advance time instantly and deterministically. Testing-library's
+      waitFor() polls for a condition with a configurable timeout,
+      giving the system exactly the time it needs.
+    severity: warning
+    tags: [testing, flaky]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: setTimeout(...)
+          - pattern-inside: |
+              $TESTFN("...", $CALLBACK)
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Use jest.useFakeTimers(), waitFor(), or flush promises instead of setTimeout.
+      example: |
+        // Before — real delay, slow and flaky
+        test("shows notification", async () => {
+          trigger();
+          await new Promise(r => setTimeout(r, 500));
+          expect(screen.getByText("Done")).toBeVisible();
+        });
+
+        // After — deterministic with fake timers
+        test("shows notification", () => {
+          jest.useFakeTimers();
+          trigger();
+          jest.advanceTimersByTime(500);
+          expect(screen.getByText("Done")).toBeVisible();
+        });
+    references:
+      - https://jestjs.io/docs/timer-mocks
+      - https://testing-library.com/docs/dom-testing-library/api-async/#waitfor
+
+  - id: ts-test-conditional-expect
+    name: Assertion inside conditional block
+    description: >
+      Flags expect() calls inside if/else blocks within tests. A
+      conditional assertion may never execute, making the test pass
+      without checking anything.
+    descriptions:
+      business: >
+        This test only checks something under certain conditions. If
+        the condition is false, no assertion runs and the test passes
+        silently. The test provides inconsistent coverage depending on
+        runtime state.
+      developer: >
+        An expect() inside an if block might never execute if the
+        condition is false. The test passes because no assertion failed,
+        not because the code is correct. Write separate tests for each
+        condition, or assert the condition itself.
+    rationale: >
+      Conditional assertions violate a core testing principle: every
+      test should assert a specific, predictable outcome. When expect()
+      is inside an if block, the test has two paths: one that asserts
+      and one that does nothing. The silent path produces a false pass.
+      Write separate test cases for each condition instead.
+    severity: warning
+    tags: [testing, correctness]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        patterns:
+          - pattern: |
+              if (...) {
+                  ...
+                  expect(...)
+                  ...
+              }
+          - pattern-inside: |
+              $TESTFN("...", $CALLBACK)
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Write separate test cases instead of conditional assertions.
+      example: |
+        // Before — assertion may not execute
+        test("handles response", () => {
+          const result = process(input);
+          if (result.success) {
+            expect(result.data).toBeDefined();
+          }
+        });
+
+        // After — separate tests for each case
+        test("handles success response", () => {
+          const result = process(successInput);
+          expect(result.success).toBe(true);
+          expect(result.data).toBeDefined();
+        });
+
+        test("handles failure response", () => {
+          const result = process(failureInput);
+          expect(result.success).toBe(false);
+        });
+    references:
+      - https://jestjs.io/docs/expect#expectassertionsnumber
+      - https://kentcdodds.com/blog/common-mistakes-with-react-testing-library
+
+  # ── Test hygiene ───────────────────────────────────────────────
+
+  - id: ts-test-console-log
+    name: Console.log left in test file
+    description: >
+      Flags console.log calls in test files. Debug logging in tests
+      clutters test output and can mask real warnings or errors.
+    descriptions:
+      business: >
+        Debug logging left in tests clutters CI output, making it harder
+        to spot real errors and warnings when something fails. Clean test
+        output means failures are immediately visible.
+      developer: >
+        console.log in tests is almost always leftover debugging. It
+        clutters test output and may inadvertently log sensitive test
+        data. Remove it, or if you need to verify logging behavior, use
+        jest.spyOn(console, 'log') to assert on log calls.
+    rationale: >
+      Console output in tests creates noise that obscures real failures.
+      When a test suite produces hundreds of log lines, developers stop
+      reading the output and miss actual warnings or errors. If you need
+      to test logging behavior, spy on console methods and assert on
+      the calls instead of producing actual output.
+    severity: warning
+    tags: [testing, hygiene]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: console.log(...)
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Remove debug logging or use jest.spyOn(console, 'log') to test log output.
+      example: |
+        // Before — debug logging in test
+        test("processes data", () => {
+          const result = process(data);
+          console.log("result:", result);
+          expect(result).toBeDefined();
+        });
+
+        // After — clean test
+        test("processes data", () => {
+          const result = process(data);
+          expect(result).toBeDefined();
+        });
+    references:
+      - https://jestjs.io/docs/jest-object#jestspyonobject-methodname
+
+  - id: ts-test-empty-describe
+    name: Empty describe block with no tests
+    description: >
+      Flags describe blocks with empty callback bodies. An empty
+      describe is a placeholder that was never filled in.
+    descriptions:
+      business: >
+        This test file has a section that looks like it should contain
+        tests but doesn't. It suggests tests were planned but never
+        written, leaving a gap in coverage that's invisible in reports.
+      developer: >
+        An empty describe block is dead code. It contributes nothing to
+        coverage or correctness. Either add the tests that belong in it
+        or remove it. If it's a placeholder for future work, create a
+        TODO issue instead.
+    rationale: >
+      Empty describe blocks are planning artifacts that should not be
+      committed. They create the appearance of test organization
+      without actual tests. In test output, they appear as a section
+      with zero tests, which is easy to miss. Either write the tests
+      or remove the block.
+    severity: warning
+    tags: [testing, maintenance]
+    detector:
+      capability: semgrep
+      config:
+        language: typescript
+        pattern: |
+          describe("...", () => {})
+    applies_to: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
+    excludes: []
+    fix:
+      message: Add tests or remove the empty describe block.
+      example: |
+        // Before — empty describe
+        describe("UserService", () => {});
+
+        // After — either add tests or remove it
+        describe("UserService", () => {
+          test("creates a user", () => {
+            const user = createUser("alice");
+            expect(user.name).toBe("alice");
+          });
+        });
+    references:
+      - https://jestjs.io/docs/api#describename-fn

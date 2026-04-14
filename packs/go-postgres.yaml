@@ -1,0 +1,777 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-postgres
+  name: Go PostgreSQL
+  version: 0.1.0
+  description: >
+    Principal-level PostgreSQL rules for Go services. Catches connection
+    lifecycle issues, SQL injection vectors, query anti-patterns, and
+    transaction misuse that cause production incidents at scale.
+  descriptions:
+    business: >
+      Your Go services talk to PostgreSQL for every customer request. This
+      pack catches the database mistakes that cause outages, data corruption,
+      and security breaches. Leaked connections silently exhaust your database
+      until the entire service goes down. Unchecked SQL injection opens the
+      door to stolen customer data. These are the exact patterns behind most
+      Postgres-related production incidents.
+    developer: >
+      database/sql has a deceptively simple API that hides serious resource
+      management pitfalls. An unclosed *sql.Rows pins a connection, a missing
+      defer tx.Rollback() leaks transactions that hold locks, and string-
+      concatenated SQL is a textbook injection vector. This pack enforces the
+      patterns a principal engineer would require in code review: context
+      propagation, proper cleanup, parameterized queries, and defensive
+      error handling.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-postgres.yaml
+  tags:
+    language: go
+    vendor: postgres
+    category: data-store
+    architecture: [services, workers]
+
+rules:
+  # ── Connection & resource lifecycle ──────────────────────────────
+
+  - id: go-pg-rows-not-closed
+    name: Query rows not closed after db.Query
+    description: >
+      db.Query() or db.QueryContext() called without a subsequent
+      defer rows.Close(). Each unclosed rows object holds a database
+      connection from the pool until garbage collection.
+    descriptions:
+      business: >
+        A database query result is opened but never properly closed. Each
+        one of these ties up a database connection permanently. Under real
+        traffic, your service runs out of connections and every customer
+        request starts failing. This is the single most common cause of
+        "the database is down" incidents in Go services.
+      developer: >
+        db.Query() returns a *sql.Rows that holds a connection from the pool
+        until Close() is called. Without defer rows.Close() right after the
+        error check, any early return leaks that connection. The GC will
+        eventually finalize it, but under load the pool exhausts long before
+        GC runs. Always defer rows.Close() immediately after the nil-error
+        check.
+    rationale: >
+      This is the #1 cause of "too many connections" incidents in Go
+      services. Each unclosed *sql.Rows pins a connection from the pool.
+      Under load the pool exhausts, new queries block, upstream timeouts
+      cascade, and the service goes down. The garbage collector will
+      eventually close it, but GC timing is non-deterministic and far too
+      slow under production traffic. Always defer rows.Close() immediately
+      after checking the error from Query.
+    severity: error
+    tags: [database, resource-leak, connection-pool]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: $ROWS, $ERR := $DB.Query(...)
+              - pattern-not-inside: |
+                  $ROWS, $ERR := $DB.Query(...)
+                  ...
+                  defer $ROWS.Close()
+          - patterns:
+              - pattern: $ROWS, $ERR := $DB.QueryContext(...)
+              - pattern-not-inside: |
+                  $ROWS, $ERR := $DB.QueryContext(...)
+                  ...
+                  defer $ROWS.Close()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add defer rows.Close() immediately after checking the error from Query.
+      example: |
+        // Before
+        rows, err := db.QueryContext(ctx, "SELECT id FROM users")
+        if err != nil { return err }
+        // rows.Close() never called — connection leaked
+
+        // After
+        rows, err := db.QueryContext(ctx, "SELECT id FROM users")
+        if err != nil { return err }
+        defer rows.Close()
+    references:
+      - https://pkg.go.dev/database/sql#Rows.Close
+      - https://go.dev/doc/database/querying
+
+  # ── Security ─────────────────────────────────────────────────────
+
+  - id: go-pg-query-string-concat
+    name: SQL query built with string concatenation
+    description: >
+      SQL query constructed using string concatenation (+) or
+      fmt.Sprintf and passed directly to a database method.
+      This is a SQL injection vector.
+    descriptions:
+      business: >
+        A database query is being built by gluing user input directly into
+        the SQL text. This is the classic SQL injection vulnerability — an
+        attacker can manipulate the query to read, modify, or delete any
+        data in your database. This is an instant security incident and
+        potential data breach if it reaches production.
+      developer: >
+        String concatenation or fmt.Sprintf to build SQL means user input
+        becomes part of the query structure, not a parameter. An attacker
+        can close the string and inject arbitrary SQL. Use parameterized
+        queries ($1, $2) which send values over the wire protocol separately
+        from the query text, making injection structurally impossible.
+    rationale: >
+      String-concatenated SQL is the textbook SQL injection vulnerability.
+      Even if the input is "trusted" today, code evolves and trust
+      boundaries shift. Parameterized queries ($1, $2) use the
+      database wire protocol to send parameters separately from the
+      query text, making injection structurally impossible. Every
+      production security audit flags this, and it is an instant
+      CVE in any public-facing service.
+    severity: error
+    tags: [database, security, sql-injection]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $DB.Query($Q + ...)
+          - pattern: $DB.QueryContext($CTX, $Q + ...)
+          - pattern: $DB.Exec($Q + ...)
+          - pattern: $DB.ExecContext($CTX, $Q + ...)
+          - pattern: $DB.Query(fmt.Sprintf(...))
+          - pattern: $DB.QueryContext($CTX, fmt.Sprintf(...))
+          - pattern: $DB.Exec(fmt.Sprintf(...))
+          - pattern: $DB.ExecContext($CTX, fmt.Sprintf(...))
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use parameterized queries with $1, $2 placeholders instead of string concatenation.
+      example: |
+        // Before — SQL injection risk
+        db.Query("SELECT * FROM users WHERE name = '" + name + "'")
+        db.Query(fmt.Sprintf("SELECT * FROM users WHERE id = %d", id))
+
+        // After — parameterized, safe
+        db.Query("SELECT * FROM users WHERE name = $1", name)
+    references:
+      - https://pkg.go.dev/database/sql#DB.Query
+      - https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html
+
+  # ── Context usage ────────────────────────────────────────────────
+
+  - id: go-pg-no-context
+    name: Database call without context
+    description: >
+      Using Query, Exec, or QueryRow instead of their Context-aware
+      variants (QueryContext, ExecContext, QueryRowContext). Without
+      context, queries cannot be cancelled or timed out.
+    descriptions:
+      business: >
+        A database query has no timeout or cancellation mechanism. If a
+        customer cancels their request or the page times out, the query
+        keeps running and holding resources. Under heavy traffic, these
+        orphaned queries pile up, waste database capacity, and can bring
+        the service down.
+      developer: >
+        The non-Context database methods (Query, Exec, QueryRow) cannot be
+        cancelled when the parent request context is done. This means a
+        cancelled HTTP request still runs its query to completion, holding a
+        pool connection and database resources. Use QueryContext, ExecContext,
+        and QueryRowContext with the request-scoped context so cancellation
+        propagates to the database driver.
+    rationale: >
+      In a service handling HTTP or gRPC requests, every database call
+      should be tied to the request context. Without it, a cancelled
+      client request (user navigates away, load balancer timeout) still
+      runs the query to completion, wasting database resources and pool
+      connections. Under load, these orphaned queries pile up and can
+      saturate both the connection pool and the database. The non-context
+      variants exist only for backward compatibility; production services
+      should exclusively use the Context variants.
+    severity: warning
+    tags: [database, context, timeout]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $DB.Query("...", ...)
+              - pattern: $DB.Exec("...", ...)
+              - pattern: $DB.QueryRow("...", ...)
+          - pattern-not-inside: |
+              func main() { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use QueryContext, ExecContext, or QueryRowContext and pass the request context.
+      example: |
+        // Before — no cancellation, no timeout
+        rows, err := db.Query("SELECT id FROM users WHERE active = $1", true)
+
+        // After — respects request lifecycle
+        rows, err := db.QueryContext(ctx, "SELECT id FROM users WHERE active = $1", true)
+    references:
+      - https://pkg.go.dev/database/sql#DB.QueryContext
+      - https://go.dev/blog/context
+
+  # ── Query anti-patterns ──────────────────────────────────────────
+
+  - id: go-pg-select-star
+    name: SELECT * in production query
+    description: >
+      Using SELECT * in a database query. This fetches all columns
+      regardless of what the code actually needs, and breaks silently
+      when the schema changes.
+    descriptions:
+      business: >
+        A query is fetching every column from a database table instead of
+        just the ones needed. This wastes bandwidth and memory, but worse,
+        it means any database schema change can silently break this code
+        in production. New columns appear, old columns disappear, and
+        suddenly customer-facing features return wrong data or crash.
+      developer: >
+        SELECT * creates an implicit contract with the full table schema.
+        When a migration adds, removes, or reorders columns, your Scan()
+        calls break at runtime — not compile time. It also pulls unnecessary
+        data across the wire and through the buffer pool. Enumerate the
+        exact columns you need so schema changes are caught at development
+        time, not in production.
+    rationale: >
+      SELECT * creates an implicit dependency on column order and
+      completeness. When a migration adds, removes, or reorders columns,
+      Scan calls break at runtime — not at compile time. It also fetches
+      data you do not need, increasing network transfer, memory allocation,
+      and database buffer pool pressure. In wide tables this can be the
+      difference between a query fitting in the buffer pool and thrashing
+      disk. Always enumerate the columns you need.
+    severity: warning
+    tags: [database, query-pattern, schema-fragility]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $DB.$METHOD($...ARGS, $QUERY, $...REST)
+          - metavariable-regex:
+              metavariable: $QUERY
+              regex: ".*SELECT\\s+\\*.*"
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "^(Query|QueryContext|QueryRow|QueryRowContext)$"
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Enumerate the specific columns needed instead of using SELECT *.
+      example: |
+        // Before — fragile, wasteful
+        db.QueryContext(ctx, "SELECT * FROM users WHERE id = $1", id)
+
+        // After — explicit, resilient to schema changes
+        db.QueryContext(ctx, "SELECT id, name, email FROM users WHERE id = $1", id)
+    references:
+      - https://wiki.postgresql.org/wiki/Don%27t_Do_This#Don.27t_use_SELECT_.2A
+
+  - id: go-pg-query-in-loop
+    name: Database query inside a loop
+    description: >
+      A database query (Query, QueryContext, Exec, ExecContext, QueryRow,
+      QueryRowContext) is executed inside a for loop. This is the classic
+      N+1 query pattern.
+    descriptions:
+      business: >
+        A database query is running once per item in a loop instead of
+        fetching everything in one call. If a customer has 200 items, this
+        fires 200 separate database queries. Page load times go from
+        milliseconds to seconds, database load multiplies, and the service
+        slows down for everyone as traffic increases.
+      developer: >
+        This is the N+1 query pattern. Each iteration issues a separate
+        round trip to the database with connection checkout, query parse,
+        and network latency. Replace with a single query using an IN clause
+        (WHERE id = ANY($1)), a JOIN, or a batch operation. Under concurrent
+        load, N+1 loops also multiply connection pool pressure and can
+        exhaust the pool entirely.
+    rationale: >
+      N+1 queries are the most common performance killer in database-backed
+      services. If the outer query returns 100 rows, the inner loop fires
+      100 additional queries. At scale this means thousands of round trips
+      per request, each with network latency, connection pool checkout, and
+      query parse overhead. Replace with a single query using JOIN, IN
+      clause, or a batch/bulk operation. This pattern is also a connection
+      pool pressure multiplier — under concurrent load, N+1 loops can
+      exhaust the pool and deadlock the service.
+    severity: warning
+    tags: [database, performance, n-plus-one]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: $DB.Query(...)
+              - pattern: $DB.QueryContext(...)
+              - pattern: $DB.QueryRow(...)
+              - pattern: $DB.QueryRowContext(...)
+              - pattern: $DB.Exec(...)
+              - pattern: $DB.ExecContext(...)
+          - pattern-inside: |
+              for ... { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Replace per-iteration queries with a batch query, JOIN, or IN clause.
+      example: |
+        // Before — N+1: one query per user
+        for _, userID := range userIDs {
+            db.QueryRowContext(ctx, "SELECT name FROM users WHERE id = $1", userID)
+        }
+
+        // After — single query with IN clause
+        db.QueryContext(ctx, "SELECT id, name FROM users WHERE id = ANY($1)", pq.Array(userIDs))
+    references:
+      - https://www.postgresql.org/docs/current/functions-comparisons.html#FUNCTIONS-COMPARISONS-IN-SCALAR
+
+  # ── Connection pool ──────────────────────────────────────────────
+
+  - id: go-pg-no-pool-config
+    name: Connection pool not configured after sql.Open
+    description: >
+      sql.Open() called without subsequently configuring connection pool
+      settings via SetMaxOpenConns and SetMaxIdleConns. The default pool
+      is unbounded.
+    descriptions:
+      business: >
+        The database connection pool has no limits configured. Under normal
+        traffic this works fine, but during a traffic spike the service opens
+        unlimited connections to PostgreSQL, exceeding the database's limits
+        and crashing every service that shares that database. One unconfigured
+        service can cause an outage for your entire platform.
+      developer: >
+        sql.DB defaults to unlimited open connections and only 2 idle
+        connections. Under concurrency, Go opens a new connection per
+        in-flight query, easily blowing past PostgreSQL's max_connections
+        (default 100). Set MaxOpenConns to your per-service share of
+        max_connections, match MaxIdleConns to avoid connection churn, and
+        set ConnMaxLifetime to handle database restarts gracefully.
+    rationale: >
+      The default sql.DB pool has no limit on open connections and a
+      default of 2 idle connections. Under load, Go will open a new
+      connection for every concurrent query, easily exceeding PostgreSQL's
+      max_connections (default 100). This causes "too many connections"
+      errors on the database side and cascading failures across all
+      services sharing that database. Always set MaxOpenConns to a value
+      well below your per-service share of max_connections, and set
+      MaxIdleConns to match so connections are reused rather than
+      churned.
+    severity: warning
+    tags: [database, connection-pool, configuration]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $DB, $ERR := sql.Open(...)
+          - pattern-not-inside: |
+              $DB, $ERR := sql.Open(...)
+              ...
+              $DB.SetMaxOpenConns(...)
+          - pattern-not-inside: |
+              $DB, $ERR := sql.Open(...)
+              ...
+              $DB.SetMaxIdleConns(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Configure SetMaxOpenConns, SetMaxIdleConns, and SetConnMaxLifetime after sql.Open.
+      example: |
+        // Before — unbounded pool, will overwhelm PostgreSQL
+        db, err := sql.Open("postgres", dsn)
+        if err != nil { return err }
+
+        // After — bounded, production-ready pool
+        db, err := sql.Open("postgres", dsn)
+        if err != nil { return err }
+        db.SetMaxOpenConns(25)
+        db.SetMaxIdleConns(25)
+        db.SetConnMaxLifetime(5 * time.Minute)
+    references:
+      - https://pkg.go.dev/database/sql#DB.SetMaxOpenConns
+      - https://www.alexedwards.net/blog/configuring-sqldb
+
+  # ── Transactions ─────────────────────────────────────────────────
+
+  - id: go-pg-tx-missing-rollback
+    name: Transaction without deferred Rollback
+    description: >
+      A transaction is started with db.Begin() or db.BeginTx() without
+      a subsequent defer tx.Rollback(). If any error occurs before
+      Commit(), the transaction leaks.
+    descriptions:
+      business: >
+        A database transaction is opened without a safety net to close it
+        if something goes wrong. A leaked transaction holds locks on data,
+        blocks other operations, prevents database maintenance, and ties up
+        a connection. Under traffic, these pile up and cause cascading
+        failures that take down the service.
+      developer: >
+        Without defer tx.Rollback(), any early return between Begin and
+        Commit leaves an open transaction holding row locks and a pool
+        connection. In PostgreSQL, idle-in-transaction sessions block
+        autovacuum and cause table bloat. The fix is simple: defer
+        tx.Rollback() right after the error check. It is a safe no-op
+        after Commit() — it just returns sql.ErrTxDone.
+    rationale: >
+      Without a deferred Rollback, any early return between Begin and
+      Commit leaves an open transaction. Open transactions hold row-level
+      locks, prevent VACUUM from reclaiming dead tuples, and consume a
+      connection from the pool. In PostgreSQL, abandoned transactions
+      cause table bloat and can trigger "too many connections" cascading
+      failures. The defer tx.Rollback() pattern is safe even after a
+      successful Commit — Rollback on a committed transaction is a no-op
+      that returns sql.ErrTxDone, which is harmlessly ignored.
+    severity: error
+    tags: [database, transactions, resource-leak]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - patterns:
+              - pattern: $TX, $ERR := $DB.Begin(...)
+              - pattern-not-inside: |
+                  $TX, $ERR := $DB.Begin(...)
+                  ...
+                  defer $TX.Rollback()
+          - patterns:
+              - pattern: $TX, $ERR := $DB.BeginTx(...)
+              - pattern-not-inside: |
+                  $TX, $ERR := $DB.BeginTx(...)
+                  ...
+                  defer $TX.Rollback()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Add defer tx.Rollback() immediately after checking the error from Begin/BeginTx.
+      example: |
+        // Before — transaction leaks on any error path
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil { return err }
+        // ... if anything fails here, transaction stays open
+
+        // After — safe, Rollback is a no-op after Commit
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil { return err }
+        defer tx.Rollback()
+        // ... do work ...
+        return tx.Commit()
+    references:
+      - https://pkg.go.dev/database/sql#Tx.Rollback
+      - https://go.dev/doc/database/execute-transactions
+
+  # ── Error handling ───────────────────────────────────────────────
+
+  - id: go-pg-err-no-rows-equality
+    name: Comparing sql.ErrNoRows with == instead of errors.Is
+    description: >
+      Comparing an error against sql.ErrNoRows using == or != instead
+      of errors.Is(). Wrapped errors will not match with direct
+      comparison.
+    descriptions:
+      business: >
+        The code checks for "record not found" using a method that breaks
+        when errors are wrapped by other libraries. This means legitimate
+        "not found" cases get treated as server errors, returning 500
+        errors to customers instead of proper "not found" responses, and
+        flooding your alerts with false alarms that hide real problems.
+      developer: >
+        Direct == comparison with sql.ErrNoRows fails when the error has
+        been wrapped with fmt.Errorf("...: %w", err) or by middleware.
+        errors.Is() unwraps the full error chain and matches correctly.
+        This is especially important in layered architectures where
+        repository errors get wrapped with context before reaching
+        handlers.
+    rationale: >
+      Go 1.13 introduced error wrapping with fmt.Errorf("...: %w", err).
+      Libraries and middleware routinely wrap errors for context. When an
+      error is wrapped, == comparison fails even though the underlying
+      cause is sql.ErrNoRows. This leads to "not found" errors being
+      treated as internal server errors, returning 500 instead of 404,
+      triggering alerts, and hiding real problems in noise. errors.Is()
+      unwraps the entire chain and matches correctly.
+    severity: warning
+    tags: [database, error-handling]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        pattern-either:
+          - pattern: $ERR == sql.ErrNoRows
+          - pattern: $ERR != sql.ErrNoRows
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use errors.Is(err, sql.ErrNoRows) instead of direct == comparison.
+      example: |
+        // Before — breaks when error is wrapped
+        if err == sql.ErrNoRows {
+            return nil, ErrNotFound
+        }
+
+        // After — works with wrapped errors
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, ErrNotFound
+        }
+    references:
+      - https://pkg.go.dev/errors#Is
+      - https://go.dev/blog/go1.13-errors
+
+  - id: go-pg-scan-err-unchecked
+    name: rows.Scan() error not checked
+    description: >
+      rows.Scan() called without checking the returned error. Silent
+      data corruption if column types or counts do not match.
+    descriptions:
+      business: >
+        A database read operation is ignoring errors when extracting data
+        from query results. When the data does not match expectations, the
+        code silently uses default zero values instead of real data. This
+        causes subtle data corruption — wrong dollar amounts, missing names,
+        blank fields — that reaches customers without any error alerts.
+      developer: >
+        rows.Scan() performs type coercion from Postgres wire types to Go
+        types. If a column is NULL and the target is not a pointer, or
+        types mismatch, Scan returns an error but leaves the target at its
+        zero value. Without checking the error, you silently process zero
+        values as real data. Always check the error from Scan.
+    rationale: >
+      Scan performs type coercion from database wire types to Go types.
+      If a column is NULL and the target is not a pointer, or if the
+      database returns a string where an int is expected, Scan returns
+      an error — but the target variable is left at its zero value.
+      Without checking the error, the code silently processes incorrect
+      data. This causes subtle bugs that are extremely hard to trace:
+      zero amounts in financial calculations, empty strings in user
+      records, and missing timestamps. These bugs often reach production
+      because they do not crash — they just produce wrong results.
+    severity: error
+    tags: [database, error-handling, data-integrity]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $ROWS.Scan(...)
+          - pattern-not: $ERR = $ROWS.Scan(...)
+          - pattern-not: $ERR := $ROWS.Scan(...)
+          - pattern-not-inside: |
+              if $ERR := $ROWS.Scan(...); $ERR != nil { ... }
+          - pattern-not-inside: |
+              if err := $ROWS.Scan(...); err != nil { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Check the error returned by rows.Scan().
+      example: |
+        // Before — silent data corruption
+        rows.Scan(&id, &name, &email)
+
+        // After — error caught immediately
+        if err := rows.Scan(&id, &name, &email); err != nil {
+            return fmt.Errorf("scanning user row: %w", err)
+        }
+    references:
+      - https://pkg.go.dev/database/sql#Rows.Scan
+
+  - id: go-pg-rows-err-unchecked
+    name: rows.Err() not checked after iteration
+    description: >
+      After iterating rows with rows.Next(), rows.Err() is not checked.
+      The iteration may have stopped early due to a database or network
+      error.
+    descriptions:
+      business: >
+        After reading database results row by row, the code does not check
+        whether the reading was cut short by a network error or database
+        problem. The service processes a partial dataset as if it were
+        complete — missing charges in billing, missing rules in permissions,
+        missing records in reports — with no error raised and no alert fired.
+      developer: >
+        rows.Next() returns false both at end-of-results and on error. If a
+        network timeout or connection reset interrupts iteration, the loop
+        exits silently with a partial result set. Check rows.Err() after the
+        loop to catch mid-iteration failures. This is especially dangerous
+        in aggregation or permission-checking code where partial results
+        look valid but are incomplete.
+    rationale: >
+      rows.Next() returns false both when all rows have been consumed
+      AND when an error occurs mid-iteration (network timeout, connection
+      reset, out-of-memory on the database). Without checking rows.Err()
+      after the loop, the code silently processes a partial result set as
+      if it were complete. In a billing system, this means missing charges.
+      In a permission system, this means missing deny rules. The partial
+      result looks valid — it is just incomplete, which is the hardest
+      class of bug to detect.
+    severity: warning
+    tags: [database, error-handling, data-integrity]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: |
+              for $ROWS.Next() { ... }
+          - pattern-not-inside: |
+              for $ROWS.Next() { ... }
+              ...
+              $ROWS.Err()
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Check rows.Err() after the iteration loop completes.
+      example: |
+        // Before — partial results processed silently
+        for rows.Next() {
+            rows.Scan(&id, &name)
+            users = append(users, User{id, name})
+        }
+
+        // After — error from interrupted iteration caught
+        for rows.Next() {
+            if err := rows.Scan(&id, &name); err != nil {
+                return nil, err
+            }
+            users = append(users, User{id, name})
+        }
+        if err := rows.Err(); err != nil {
+            return nil, fmt.Errorf("iterating user rows: %w", err)
+        }
+    references:
+      - https://pkg.go.dev/database/sql#Rows.Err
+      - https://go.dev/doc/database/querying
+
+  # ── Initialization ──────────────────────────────────────────────
+
+  - id: go-pg-missing-ping
+    name: sql.Open without Ping to verify connectivity
+    description: >
+      sql.Open() does not actually connect to the database. Without a
+      subsequent Ping() or PingContext(), connection failures will not
+      be detected until the first query.
+    descriptions:
+      business: >
+        The service starts up without verifying it can actually reach the
+        database. It will appear healthy, pass into the load balancer
+        rotation, and start accepting customer traffic — then immediately
+        fail on every request that touches the database. A simple Ping at
+        startup turns a customer-facing incident into a caught deploy
+        failure.
+      developer: >
+        sql.Open() only validates the driver name and DSN format — it does
+        not open a TCP connection or authenticate. Without a PingContext()
+        call after Open, you will not discover misconfigured DSNs, network
+        issues, or auth failures until the first real query. Call
+        db.PingContext(ctx) immediately after Open to fail fast at startup.
+    rationale: >
+      sql.Open validates the driver name and DSN format but does not
+      establish a TCP connection or authenticate. If the database is
+      unreachable, the service will start successfully, pass health
+      checks (if they do not query the DB), accept traffic, and then
+      fail on the first real query — returning errors to users. Calling
+      PingContext immediately after Open fails fast at startup, before
+      the service enters the load balancer rotation. This turns a
+      runtime surprise into a deploy-time failure, which is always
+      preferable.
+    severity: info
+    tags: [database, initialization, fail-fast]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $DB, $ERR := sql.Open(...)
+          - pattern-not-inside: |
+              $DB, $ERR := sql.Open(...)
+              ...
+              $DB.Ping(...)
+          - pattern-not-inside: |
+              $DB, $ERR := sql.Open(...)
+              ...
+              $DB.PingContext(...)
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Call db.PingContext(ctx) after sql.Open to verify the connection at startup.
+      example: |
+        // Before — service starts even if DB is unreachable
+        db, err := sql.Open("postgres", dsn)
+        if err != nil { return err }
+
+        // After — fails fast at startup
+        db, err := sql.Open("postgres", dsn)
+        if err != nil { return err }
+        if err := db.PingContext(ctx); err != nil {
+            return fmt.Errorf("connecting to postgres: %w", err)
+        }
+    references:
+      - https://pkg.go.dev/database/sql#DB.PingContext
+      - https://go.dev/doc/database/open-handle
+
+  # ── Transaction context ─────────────────────────────────────────
+
+  - id: go-pg-transaction-context
+    name: Transaction started without context
+    description: >
+      Using db.Begin() instead of db.BeginTx(ctx, opts). Transactions
+      without context cannot be cancelled on request timeout.
+    descriptions:
+      business: >
+        A database transaction is started without any timeout or
+        cancellation mechanism. If the customer's request is cancelled or
+        times out, the transaction keeps running and holding locks on data.
+        Under load, these zombie transactions compound — each one makes the
+        next slower — until the database grinds to a halt for all users.
+      developer: >
+        db.Begin() has no cancellation path. If the HTTP/gRPC request
+        context is cancelled, the transaction continues holding row locks
+        and a pool connection. Use db.BeginTx(ctx, nil) so the transaction
+        is automatically aborted when the request context expires, releasing
+        locks immediately instead of waiting for an idle-in-transaction
+        timeout.
+    rationale: >
+      Transactions hold locks for their entire duration. A transaction
+      started with Begin() has no cancellation mechanism — if the HTTP
+      request is cancelled or times out, the transaction continues running,
+      holding row locks and a connection. Under load, this causes lock
+      contention that compounds geometrically: slow queries hold locks
+      longer, causing more queries to wait, which hold locks even longer.
+      BeginTx with a request-scoped context ensures the transaction is
+      aborted when the request is cancelled, releasing locks immediately.
+    severity: warning
+    tags: [database, transactions, context]
+    detector:
+      capability: semgrep
+      config:
+        language: go
+        patterns:
+          - pattern: $DB.Begin()
+          - pattern-not-inside: |
+              func main() { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
+    fix:
+      message: Use db.BeginTx(ctx, nil) instead of db.Begin() to support cancellation.
+      example: |
+        // Before — transaction cannot be cancelled
+        tx, err := db.Begin()
+
+        // After — transaction respects request lifecycle
+        tx, err := db.BeginTx(ctx, nil)
+    references:
+      - https://pkg.go.dev/database/sql#DB.BeginTx
+      - https://go.dev/doc/database/execute-transactions
