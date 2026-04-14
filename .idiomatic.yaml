@@ -6,6 +6,7 @@ capabilities:
     path:
       - capabilities/semgrep.yaml
       - capabilities/eslint.yaml
+      - capabilities/golangci-lint.yaml
 
 packs:
   - repo: https://github.com/adamgilman/idiomatic

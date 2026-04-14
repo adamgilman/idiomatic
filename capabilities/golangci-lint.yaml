@@ -32,6 +32,7 @@ spec:
       path: "{tmp}/idio-golangci-lint.yml"
       # Build a deduplicated linter list and merge per-linter settings.
       template: |
+        version: "2"
         linters:
           disable-all: true
           enable:
