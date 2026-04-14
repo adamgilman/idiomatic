@@ -221,7 +221,7 @@ func emitErrorAndExit(formatter output.Formatter, rules []manifestlib.Rule, file
 		meta.ExecError = errMsg
 		out, _ := formatter.Format(nil, rules, files, meta)
 		if len(out) > 0 {
-			os.Stdout.Write(out)
+			_, _ = os.Stdout.Write(out)
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "error: %s\n", errMsg)
