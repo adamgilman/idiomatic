@@ -157,7 +157,7 @@ func NewCmdScan() *cobra.Command {
 			}
 
 			if len(out) > 0 {
-				cmd.OutOrStdout().Write(out)
+				_, _ = cmd.OutOrStdout().Write(out)
 			}
 
 			if len(allFindings) > 0 {
@@ -211,7 +211,7 @@ func runClaudeHook(ctx context.Context, cmd *cobra.Command, configPath string, m
 
 	resp, _ := claudehook.Run(ctx, stdinData, backends, registry, rules, meta)
 	if len(resp) > 0 {
-		cmd.OutOrStdout().Write(resp)
+		_, _ = cmd.OutOrStdout().Write(resp)
 	}
 	return nil
 }
