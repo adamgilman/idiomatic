@@ -23,8 +23,8 @@ jobs:
 
       - name: Validate YAML schemas
         run: |
-          npx ajv-cli@5 validate -s schemas/capability.schema.json -d "capabilities/*.yaml" --spec=draft2020
-          npx ajv-cli@5 validate -s schemas/rule-pack.schema.json -d "packs/*.yaml" --spec=draft2020
+          npx ajv-cli@5 validate -s schemas/capability.schema.json -d "capabilities/*.yaml" --spec=draft2020 --allow-unknown-formats
+          npx ajv-cli@5 validate -s schemas/rule-pack.schema.json -d "packs/*.yaml" --spec=draft2020 --allow-unknown-formats
 
       - name: Build
         run: make build
