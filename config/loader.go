@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// loader.go — Clones git repos and loads capabilities + packs into a LoadedProject.
+// loader.go — Resolves capabilities and packs from a ProjectConfig into a LoadedProject.
 //
-//   - LoadProject clones each unique repo once (deduped by URL) then resolves paths within clones
-//   - Capabilities are loaded into a declarative.Registry; packs are parsed into manifest.Rules
-//   - Pack load errors are fatal; pack warnings are collected and returned for the caller to surface
-//   - This is the bridge between the config YAML and the engine's runtime types
+//   - When a source has a repo URL, CloneRepo fetches it and paths resolve within the clone
+//   - When repo is omitted, paths resolve relative to the config file (local development)
+//   - Each unique repo is cloned once (deduped by URL)
+//   - Capabilities go into a declarative.Registry; packs are parsed into manifest.Rules
 package config
 
 import (
@@ -24,16 +24,11 @@ type LoadedProject struct {
 
 func LoadProject(cfg *ProjectConfig) (*LoadedProject, error) {
 	repoCache := map[string]string{}
-	for _, src := range cfg.Capabilities {
-		if _, ok := repoCache[src.Repo]; !ok {
-			local, err := declarative.CloneRepo(src.Repo)
-			if err != nil {
-				return nil, fmt.Errorf("clone %s: %w", src.Repo, err)
-			}
-			repoCache[src.Repo] = local
+	allSources := append(cfg.Capabilities, cfg.Packs...)
+	for _, src := range allSources {
+		if src.Repo == "" {
+			continue
 		}
-	}
-	for _, src := range cfg.Packs {
 		if _, ok := repoCache[src.Repo]; !ok {
 			local, err := declarative.CloneRepo(src.Repo)
 			if err != nil {
@@ -45,7 +40,7 @@ func LoadProject(cfg *ProjectConfig) (*LoadedProject, error) {
 
 	registry := declarative.NewRegistry()
 	for _, src := range cfg.Capabilities {
-		base := repoCache[src.Repo]
+		base := resolveBase(src, repoCache, cfg.Dir)
 		for _, p := range src.Path {
 			capPath := filepath.Join(base, p)
 			caps, err := declarative.LoadPath(capPath)
@@ -63,7 +58,7 @@ func LoadProject(cfg *ProjectConfig) (*LoadedProject, error) {
 	var allRules []manifest.Rule
 	var allWarnings []string
 	for _, src := range cfg.Packs {
-		base := repoCache[src.Repo]
+		base := resolveBase(src, repoCache, cfg.Dir)
 		for _, p := range src.Path {
 			packPath := filepath.Join(base, p)
 			result, err := manifest.LoadFile(packPath)
@@ -85,4 +80,11 @@ func LoadProject(cfg *ProjectConfig) (*LoadedProject, error) {
 		Rules:    allRules,
 		Warnings: allWarnings,
 	}, nil
+}
+
+func resolveBase(src GitSource, repoCache map[string]string, configDir string) string {
+	if src.Repo == "" {
+		return configDir
+	}
+	return repoCache[src.Repo]
 }

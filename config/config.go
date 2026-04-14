@@ -2,15 +2,17 @@
 
 // config.go — ProjectConfig types and YAML parser for .idiomatic.yaml files.
 //
-//   - ProjectConfig declares git-hosted capability and pack sources (repo + paths)
-//   - Load performs strict validation: Kind must be "ProjectConfig", and both
-//     capabilities and packs must be non-empty with repo and path on every entry
-//   - This is pure parsing/validation; actual git cloning happens in loader.go
+//   - ProjectConfig declares capability and pack sources as repo + paths entries
+//   - When repo is set, paths are resolved from a git clone of that repo
+//   - When repo is omitted, paths are resolved relative to the config file (local dev)
+//   - Load performs strict validation: Kind must be "ProjectConfig", capabilities
+//     and packs must be non-empty, every entry must have at least one path
 package config
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -20,6 +22,10 @@ type ProjectConfig struct {
 	Kind         string      `yaml:"kind"`
 	Capabilities []GitSource `yaml:"capabilities"`
 	Packs        []GitSource `yaml:"packs"`
+
+	// Dir is the directory containing the config file. Used to resolve
+	// local paths when repo is omitted. Set by Load(), not from YAML.
+	Dir string `yaml:"-"`
 }
 
 type GitSource struct {
@@ -46,20 +52,15 @@ func Load(path string) (*ProjectConfig, error) {
 		return nil, fmt.Errorf("%s: no packs declared", path)
 	}
 	for i, src := range cfg.Capabilities {
-		if src.Repo == "" {
-			return nil, fmt.Errorf("%s: capabilities[%d].repo is required", path, i)
-		}
 		if len(src.Path) == 0 {
 			return nil, fmt.Errorf("%s: capabilities[%d].path is required", path, i)
 		}
 	}
 	for i, src := range cfg.Packs {
-		if src.Repo == "" {
-			return nil, fmt.Errorf("%s: packs[%d].repo is required", path, i)
-		}
 		if len(src.Path) == 0 {
 			return nil, fmt.Errorf("%s: packs[%d].path is required", path, i)
 		}
 	}
+	cfg.Dir = filepath.Dir(path)
 	return &cfg, nil
 }

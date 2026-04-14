@@ -4,7 +4,7 @@ Deterministic enforcement for stochastic development.
 
 [![CI](https://github.com/adamgilman/idiomatic/actions/workflows/ci.yml/badge.svg)](https://github.com/adamgilman/idiomatic/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)
 
 Idiomatic runs alongside AI coding agents like Claude Code. After every file edit, it checks the code against YAML rule packs using external analysis tools (ESLint, Semgrep, golangci-lint, gosec, gitleaks) and feeds findings back into the LLM's context. The LLM reads the findings and fixes violations before the developer ever sees them — converging to code that meets your standards on every commit.
 

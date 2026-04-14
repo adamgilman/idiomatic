@@ -4,7 +4,7 @@ Thank you for your interest in contributing. This guide covers everything you ne
 
 ## Prerequisites
 
-- Go 1.26+
+- Go 1.25+
 - make
 
 For running rule packs locally, you'll also need the external tools referenced by the capabilities you're testing (e.g. `semgrep`, `eslint`, `golangci-lint`).

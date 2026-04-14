@@ -111,7 +111,7 @@ capabilities:
 	}
 }
 
-func TestLoad_MissingRepo(t *testing.T) {
+func TestLoad_LocalPath_NoRepo(t *testing.T) {
 	p := writeTemp(t, `
 apiVersion: config.idiomatic.dev/v1alpha1
 kind: ProjectConfig
@@ -121,12 +121,12 @@ packs:
   - repo: https://example.com/repo.git
     path: [packs/bar.yaml]
 `)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error for missing repo")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("expected success for omitted repo (local dev), got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "capabilities[0].repo is required") {
-		t.Fatalf("unexpected error: %v", err)
+	if cfg.Capabilities[0].Repo != "" {
+		t.Fatalf("expected empty repo, got %q", cfg.Capabilities[0].Repo)
 	}
 }
 
