@@ -36,6 +36,7 @@ brews:
   - repository:
       owner: adamgilman
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/adamgilman/idiomatic
     description: Deterministic enforcement for stochastic development
     license: Apache-2.0
