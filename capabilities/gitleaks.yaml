@@ -8,7 +8,6 @@ metadata:
 
 spec:
   # Secret detection applies to every file regardless of extension.
-  applies_to_files:
 
   requires:
     binary: gitleaks

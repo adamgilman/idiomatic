@@ -7,7 +7,6 @@ metadata:
   description: Per-rule check that a file exists at the project root. Wraps stat; rule supplies the relative path and fire_when.
 
 spec:
-  applies_to_files:
 
   requires:
     binary: stat

@@ -8,7 +8,6 @@ metadata:
 
 spec:
   # Repository-level checks fire regardless of which file triggered the scan.
-  applies_to_files:
 
   requires:
     binary: git

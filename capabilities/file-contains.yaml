@@ -7,7 +7,6 @@ metadata:
   description: Per-rule check that a file contains a regex. Wraps grep -E -q; rule supplies path, pattern, and fire_when.
 
 spec:
-  applies_to_files:
 
   requires:
     binary: grep
