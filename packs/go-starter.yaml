@@ -600,6 +600,35 @@ rules:
         // After
         return fmt.Errorf("failed: %w", err)
 
+  - id: go-check-error-return
+    name: Error return values must be checked
+    description: Flags function calls where an error return value is silently discarded.
+    rationale: |
+      Ignoring errors hides failures. Every error return should be checked,
+      handled, or explicitly discarded with `_ =` to signal intent.
+    severity: error
+    tags:
+      - errors
+      - go
+    detector:
+      capability: golangci-lint
+      config:
+        linter: errcheck
+    applies_to:
+      - "**/*.go"
+    excludes:
+      - "**/testdata/**"
+      - "**/vendor/**"
+    fix:
+      message: Check the error return value or explicitly discard it with `_ =`.
+      example: |
+        // Before
+        os.Remove(path)
+        f.Close()
+        // After
+        _ = os.Remove(path)
+        if err := f.Close(); err != nil { return err }
+
   - id: go-require-doc-comment
     name: Exported symbols must have doc comments
     description: Flags exported functions, types, and methods without a godoc comment.
