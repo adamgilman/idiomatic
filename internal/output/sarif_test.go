@@ -86,7 +86,7 @@ func TestSARIF_Version(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	if log.Version != "2.1.0" {
 		t.Errorf("version = %q, want %q", log.Version, "2.1.0")
@@ -101,7 +101,7 @@ func TestSARIF_SingleRun(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	if len(log.Runs) != 1 {
 		t.Fatalf("expected 1 run, got %d", len(log.Runs))
@@ -113,7 +113,7 @@ func TestSARIF_RulesSortedByID(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	rules := log.Runs[0].Tool.Driver.Rules
 	if len(rules) != 2 {
@@ -133,7 +133,7 @@ func TestSARIF_RuleLevelMapping(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	for _, rule := range log.Runs[0].Tool.Driver.Rules {
 		if rule.DefaultConfiguration.Level != "error" {
@@ -147,7 +147,7 @@ func TestSARIF_RuleProperties(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	// First rule (panic) has tags and references.
 	panicRule := log.Runs[0].Tool.Driver.Rules[0]
@@ -167,7 +167,7 @@ func TestSARIF_Results(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	results := log.Runs[0].Results
 	if len(results) != 2 {
@@ -197,7 +197,7 @@ func TestSARIF_ResultRuleIndex(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	rules := log.Runs[0].Tool.Driver.Rules
 	for _, r := range log.Runs[0].Results {
@@ -217,7 +217,7 @@ func TestSARIF_ResultArtifactIndex(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	artifacts := log.Runs[0].Artifacts
 	for _, r := range log.Runs[0].Results {
@@ -237,7 +237,7 @@ func TestSARIF_Artifacts(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	// Should contain all analyzed files, not just those with findings.
 	if len(log.Runs[0].Artifacts) != 3 {
@@ -250,7 +250,7 @@ func TestSARIF_Fixes(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	for _, r := range log.Runs[0].Results {
 		if len(r.Fixes) == 0 {
@@ -302,7 +302,7 @@ func TestSARIF_ExecutionError(t *testing.T) {
 	}
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	inv := log.Runs[0].Invocations[0]
 	if inv.ExecutionSuccessful {
@@ -318,7 +318,7 @@ func TestSARIF_Invocation(t *testing.T) {
 	data, _ := f.Format(testFindings, testRules, testFiles, testMeta)
 
 	var log SARIFLog
-	json.Unmarshal(data, &log)
+	_ = json.Unmarshal(data, &log)
 
 	inv := log.Runs[0].Invocations[0]
 	if !inv.ExecutionSuccessful {

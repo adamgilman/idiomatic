@@ -74,7 +74,7 @@ func TestParseConstraint_Matches(t *testing.T) {
 
 func TestCheckRuleVersions_Match(t *testing.T) {
 	r := NewRegistry()
-	r.Add(&Capability{spec: CapabilitySpec{
+	if err := r.Add(&Capability{spec: CapabilitySpec{
 		APIVersion: CapabilityAPIVersion,
 		Kind:       CapabilityKind,
 		Metadata:   CapabilityMetadata{Name: "semgrep", Version: "1.4.2"},
@@ -83,7 +83,9 @@ func TestCheckRuleVersions_Match(t *testing.T) {
 			Run:      RunSpec{Argv: []string{"x"}},
 			Signal:   SignalSpec{Shape: "list", MatchRuleBy: &MatchRuleBy{From: "id"}},
 		},
-	}})
+	}}); err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name      string
@@ -140,7 +142,7 @@ func TestCheckRuleVersions_Match(t *testing.T) {
 
 func TestCheckRuleVersions_BadConstraintError(t *testing.T) {
 	r := NewRegistry()
-	r.Add(&Capability{spec: CapabilitySpec{
+	if err := r.Add(&Capability{spec: CapabilitySpec{
 		APIVersion: CapabilityAPIVersion,
 		Kind:       CapabilityKind,
 		Metadata:   CapabilityMetadata{Name: "semgrep", Version: "1.0.0"},
@@ -149,7 +151,9 @@ func TestCheckRuleVersions_BadConstraintError(t *testing.T) {
 			Run:      RunSpec{Argv: []string{"x"}},
 			Signal:   SignalSpec{Shape: "list", MatchRuleBy: &MatchRuleBy{From: "id"}},
 		},
-	}})
+	}}); err != nil {
+		t.Fatal(err)
+	}
 
 	err := r.CheckRuleVersions([]RuleVersionRequest{{
 		RuleID: "r1", Capability: "semgrep", Constraint: "not a real constraint",

@@ -49,7 +49,7 @@ func TestCloneRepo_NoGit(t *testing.T) {
 	// Remove any pre-existing cache entry (unlikely but safe).
 	cacheDir, _ := os.UserCacheDir()
 	target := filepath.Join(cacheDir, "idiomatic", "repos", urlHash(uniqueURL))
-	os.RemoveAll(target)
+	_ = os.RemoveAll(target)
 
 	_, err := CloneRepo(uniqueURL)
 	if err == nil {

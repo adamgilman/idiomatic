@@ -105,7 +105,7 @@ func (c *Capability) runBatch(ctx context.Context, req engine.AnalysisRequest) (
 			return nil, fmt.Errorf("render config_file: %w", err)
 		}
 		configPath = path
-		defer os.Remove(configPath)
+		defer func() { _ = os.Remove(configPath) }()
 	}
 
 	invFiles := files
@@ -210,8 +210,8 @@ func (c *Capability) execOnce(ctx context.Context, bin string, ictx invocationCt
 			return nil, fmt.Errorf("create report file: %w", err)
 		}
 		ictx.ReportPath = f.Name()
-		f.Close()
-		defer os.Remove(ictx.ReportPath)
+		_ = f.Close()
+		defer func() { _ = os.Remove(ictx.ReportPath) }()
 	}
 
 	argv, err := c.expandArgv(ictx, templateView)
@@ -325,11 +325,11 @@ func writeConfigToPath(path string, rt *runtimeCtx, content []byte) (string, err
 			return "", fmt.Errorf("create temp config: %w", err)
 		}
 		if _, err := f.Write(content); err != nil {
-			f.Close()
-			os.Remove(f.Name())
+			_ = f.Close()
+			_ = os.Remove(f.Name())
 			return "", fmt.Errorf("write config: %w", err)
 		}
-		f.Close()
+		_ = f.Close()
 		return f.Name(), nil
 	}
 

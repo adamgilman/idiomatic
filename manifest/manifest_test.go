@@ -9,6 +9,7 @@
 package manifest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -414,7 +415,13 @@ func TestSummary(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	// Create the malformed YAML test fixture.
-	os.MkdirAll("testdata", 0755)
-	os.WriteFile(filepath.Join("testdata", "malformed.yaml"), []byte("{{invalid yaml: ["), 0644)
+	if err := os.MkdirAll("testdata", 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create testdata dir: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(filepath.Join("testdata", "malformed.yaml"), []byte("{{invalid yaml: ["), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write test fixture: %v\n", err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }

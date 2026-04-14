@@ -101,7 +101,7 @@ type storedToken struct {
 func configDir() string {
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".config", "idio")
-	os.MkdirAll(dir, 0700)
+	_ = os.MkdirAll(dir, 0700)
 	return dir
 }
 

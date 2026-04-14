@@ -208,8 +208,8 @@ func BuildResponse(findings []engine.Finding, rules []manifest.Rule, files []str
 	if err != nil {
 		return emitError("Failed to create temp file", err.Error(), "")
 	}
-	tmpFile.Write(sarifBytes)
-	tmpFile.Close()
+	_, _ = tmpFile.Write(sarifBytes)
+	_ = tmpFile.Close()
 
 	compact := BuildCompactSummary(findings, files, tmpFile.Name())
 	compactBytes, err := json.Marshal(compact)

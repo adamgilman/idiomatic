@@ -179,7 +179,9 @@ func TestBuildResponse_UnderBudget(t *testing.T) {
 	}
 
 	var hookResp HookResponse
-	json.Unmarshal(resp, &hookResp)
+	if err := json.Unmarshal(resp, &hookResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
 
 	// Should be SARIF (has "version" field).
 	var sarif map[string]interface{}
@@ -198,10 +200,14 @@ func TestBuildResponse_ZeroFindings(t *testing.T) {
 	}
 
 	var hookResp HookResponse
-	json.Unmarshal(resp, &hookResp)
+	if err := json.Unmarshal(resp, &hookResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
 
 	var sarif map[string]interface{}
-	json.Unmarshal([]byte(hookResp.HookSpecificOutput.AdditionalContext), &sarif)
+	if err := json.Unmarshal([]byte(hookResp.HookSpecificOutput.AdditionalContext), &sarif); err != nil {
+		t.Fatalf("failed to unmarshal additionalContext: %v", err)
+	}
 	if sarif["version"] != "2.1.0" {
 		t.Error("expected SARIF even with zero findings")
 	}
@@ -211,10 +217,10 @@ func TestEmitError_Format(t *testing.T) {
 	resp, _ := emitError("test error", "detail here", "do this")
 
 	var hookResp HookResponse
-	json.Unmarshal(resp, &hookResp)
+	_ = json.Unmarshal(resp, &hookResp)
 
 	var errPayload ErrorPayload
-	json.Unmarshal([]byte(hookResp.HookSpecificOutput.AdditionalContext), &errPayload)
+	_ = json.Unmarshal([]byte(hookResp.HookSpecificOutput.AdditionalContext), &errPayload)
 
 	if errPayload.Error != "test error" {
 		t.Errorf("error = %q", errPayload.Error)
@@ -302,7 +308,7 @@ func TestBuildResponse_SystemMessage_Present(t *testing.T) {
 	resp, _ := BuildResponse(findings, rules, []string{"a.go"}, testMeta)
 
 	var hookResp HookResponse
-	json.Unmarshal(resp, &hookResp)
+	_ = json.Unmarshal(resp, &hookResp)
 
 	if hookResp.SystemMessage != "idiomatic: 1 issue found (error)" {
 		t.Errorf("systemMessage = %q", hookResp.SystemMessage)
@@ -313,7 +319,7 @@ func TestBuildResponse_SystemMessage_Absent_ZeroFindings(t *testing.T) {
 	resp, _ := BuildResponse(nil, nil, []string{"a.go"}, testMeta)
 
 	var hookResp HookResponse
-	json.Unmarshal(resp, &hookResp)
+	_ = json.Unmarshal(resp, &hookResp)
 
 	if hookResp.SystemMessage != "" {
 		t.Errorf("expected empty systemMessage for zero findings, got %q", hookResp.SystemMessage)
@@ -321,7 +327,7 @@ func TestBuildResponse_SystemMessage_Absent_ZeroFindings(t *testing.T) {
 
 	// Also verify the field is actually absent from JSON (omitempty).
 	var raw map[string]interface{}
-	json.Unmarshal(resp, &raw)
+	_ = json.Unmarshal(resp, &raw)
 	if _, exists := raw["systemMessage"]; exists {
 		t.Error("systemMessage field should be absent from JSON when empty")
 	}

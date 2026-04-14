@@ -42,7 +42,7 @@ func CloneRepo(url string) (string, error) {
 
 	cmd := exec.Command("git", "clone", "--depth", "1", url, target)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		os.RemoveAll(target)
+		_ = os.RemoveAll(target)
 		return "", fmt.Errorf("git clone %s: %w\n%s", url, err, string(out))
 	}
 	return target, nil

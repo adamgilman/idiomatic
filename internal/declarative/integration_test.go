@@ -39,7 +39,7 @@ func TestDiscoverBinary_WalkUpFromCwd(t *testing.T) {
 
 	// Run the discovery from the sub directory.
 	prevWd, _ := os.Getwd()
-	defer os.Chdir(prevWd)
+	defer func() { _ = os.Chdir(prevWd) }()
 	if err := os.Chdir(subDir); err != nil {
 		t.Fatal(err)
 	}
@@ -79,11 +79,15 @@ func TestDiscoverFiles_WalkUpAndOptional(t *testing.T) {
 		t.Fatal(err)
 	}
 	subDir := filepath.Join(root, "sub")
-	os.MkdirAll(subDir, 0755)
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	prevWd, _ := os.Getwd()
-	defer os.Chdir(prevWd)
-	os.Chdir(subDir)
+	defer func() { _ = os.Chdir(prevWd) }()
+	if err := os.Chdir(subDir); err != nil {
+		t.Fatal(err)
+	}
 
 	cap := &Capability{spec: CapabilitySpec{
 		Metadata: CapabilityMetadata{Name: "mytool", Version: "1.0.0"},
@@ -115,7 +119,9 @@ func TestDiscoverFiles_WalkUpAndOptional(t *testing.T) {
 func TestPrecheck_FileExistsForEachUniqueInput(t *testing.T) {
 	root := t.TempDir()
 	pluginDir := filepath.Join(root, "node_modules", "good-plugin")
-	os.MkdirAll(pluginDir, 0755)
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	cap := &Capability{spec: CapabilitySpec{
 		Metadata: CapabilityMetadata{Name: "mytool", Version: "1.0.0"},
@@ -309,22 +315,32 @@ func TestEslintBuiltin_LoadAndValidate(t *testing.T) {
 func TestEslint_Analyze_E2E_FakeBinary(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "node_modules", ".bin")
-	os.MkdirAll(binDir, 0755)
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	stub := filepath.Join(binDir, "eslint")
 	if err := os.WriteFile(stub, []byte(fakeEslintScript), 0755); err != nil {
 		t.Fatal(err)
 	}
 	tsconfig := filepath.Join(root, "tsconfig.json")
-	os.WriteFile(tsconfig, []byte("{}"), 0644)
+	if err := os.WriteFile(tsconfig, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	subDir := filepath.Join(root, "sub")
-	os.MkdirAll(subDir, 0755)
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(subDir, "main.ts")
-	os.WriteFile(target, []byte("const x: any = 1;\n"), 0644)
+	if err := os.WriteFile(target, []byte("const x: any = 1;\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	prevWd, _ := os.Getwd()
-	defer os.Chdir(prevWd)
-	os.Chdir(subDir)
+	defer func() { _ = os.Chdir(prevWd) }()
+	if err := os.Chdir(subDir); err != nil {
+		t.Fatal(err)
+	}
 
 	caps, _ := LoadPath(repoCapabilitiesDir(t))
 	var es *Capability
