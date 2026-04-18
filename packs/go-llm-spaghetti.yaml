@@ -1,0 +1,426 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: go-llm-spaghetti
+  name: Go LLM Spaghetti
+  version: 0.1.0
+  description: >
+    Detects the structural smells that LLM-generated Go code reliably
+    produces: deep nesting, cognitive overload, branchy control flow,
+    bloated functions, copy-pasted blocks, and over-abstracted wrappers.
+    These are not stylistic nits — each one is a signal that code should
+    be reshaped before the next change lands on top of it.
+  maintainer: idiomatic
+  license: Proprietary
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-llm-spaghetti.yaml
+
+rules:
+  # ── Complexity: how hard is this function to hold in your head? ──
+
+  - id: go-cognitive-complexity
+    name: Function is cognitively too complex
+    description: >
+      Flags functions whose cognitive complexity score exceeds 15.
+      Cognitive complexity penalizes nesting and control-flow breaks in
+      proportion to how much effort they impose on a reader.
+    rationale: >
+      LLMs often produce functions that technically work but pile branch
+      on branch, with each nested `if err != nil` and loop-within-loop
+      adding to a reader's working-memory load. Cognitive complexity is
+      a better proxy for "I can't follow this" than raw line count or
+      cyclomatic complexity because it weights nesting heavier than
+      siblings. A score over 15 is almost always a function doing two
+      or three distinct jobs that should be split apart.
+    severity: warning
+    tags: [complexity, readability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: gocognit
+        rule: cognitive complexity
+        settings:
+          min-complexity: 15
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: >
+        Extract the most deeply nested block into its own well-named function,
+        or replace an if-else ladder with a switch or a lookup table.
+      example: |
+        // Before: cognitive complexity 18
+        func Process(items []Item) error {
+            for _, it := range items {
+                if it.Valid {
+                    if it.Kind == "A" {
+                        for _, s := range it.Subs {
+                            if s.Ready { /* ... */ }
+                        }
+                    } else if it.Kind == "B" { /* ... */ }
+                }
+            }
+            return nil
+        }
+        // After: split per-item handling into processItem(it)
+    references:
+      - https://www.sonarsource.com/docs/CognitiveComplexity.pdf
+
+  - id: go-cyclomatic-complexity
+    name: Function has too many branches
+    description: >
+      Flags functions with a cyclomatic complexity above 12.
+    rationale: >
+      Cyclomatic complexity counts the linearly independent paths through
+      a function — every if, case, and &&/|| adds one. Over 12 means the
+      function is functionally a tangle of decision points, and the test
+      surface required to cover it honestly starts to exceed what anyone
+      will actually write. LLMs reliably overshoot this threshold when
+      asked to "handle all the cases" in one function.
+    severity: warning
+    tags: [complexity, testability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: cyclop
+        rule: cyclomatic complexity
+        settings:
+          max-complexity: 12
+          skip-tests: true
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: >
+        Split the function along its decision boundaries. If several branches
+        share structure, dispatch through a map or a switch over a small type.
+      example: |
+        // Before: one func with 14 branches
+        // After: dispatcher + per-case handlers
+        var handlers = map[Kind]func(Item) error{
+            KindA: handleA,
+            KindB: handleB,
+        }
+
+  - id: go-deeply-nested-if
+    name: If-blocks are nested too deeply
+    description: >
+      Flags if-statements whose complexity (measured by nestif) exceeds 4.
+      The metric weighs both depth and branching.
+    rationale: >
+      Deep nesting is the single most reliable visual tell of LLM spaghetti:
+      pyramid-shaped code that marches rightward as it handles each edge
+      case inside the previous one. The remedy is almost always an early
+      return or a guard clause, not another level of indentation.
+    severity: warning
+    tags: [nesting, readability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: nestif
+        rule: nested if
+        settings:
+          min-complexity: 4
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: >
+        Invert the outer condition and return early. Replace nested
+        `if ok { ... } else { return err }` with `if !ok { return err }`.
+      example: |
+        // Before
+        if user != nil {
+            if user.Active {
+                if user.HasRole("admin") {
+                    return doThing(user)
+                }
+            }
+        }
+        return errUnauthorized
+        // After
+        if user == nil || !user.Active || !user.HasRole("admin") {
+            return errUnauthorized
+        }
+        return doThing(user)
+
+  - id: go-function-too-long
+    name: Function is too long
+    description: >
+      Flags functions over 80 lines or 50 statements.
+    rationale: >
+      LLMs, when asked to "write a function that does X", tend to produce
+      one long function instead of a handful of small ones, because the
+      prompt framed the problem as a single task. An 80-line function is
+      rarely one unit of work; it's two or three that happen to share a
+      scope. Splitting them makes each piece independently testable.
+    severity: warning
+    tags: [size, readability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: funlen
+        rule: "Function '"
+        settings:
+          lines: 80
+          statements: 50
+          ignore-comments: true
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: >
+        Identify the two or three distinct phases in the function and extract
+        each into its own function with a name describing what it does.
+      example: |
+        // Before: one 120-line HandleRequest
+        // After:
+        //   parseRequest(...)
+        //   validatePayload(...)
+        //   dispatch(...)
+        //   writeResponse(...)
+
+  # ── Control flow: branchy shapes that should be flattened ──
+
+  - id: go-if-else-chain
+    name: If-else chain should be a switch
+    description: >
+      Flags long if-else-if chains that would be clearer as a switch.
+    rationale: >
+      LLMs frequently emit `if x == "A" { ... } else if x == "B" { ... } else if ...`
+      ladders instead of a switch, because they generate line-by-line and
+      each branch feels like "just one more condition." Switches are easier
+      to read, make the fall-through story explicit, and let the compiler
+      warn about missing cases when combined with a small sum type.
+    severity: warning
+    tags: [control-flow, readability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: gocritic
+        rule: ifElseChain
+        settings:
+          enabled-checks:
+            - ifElseChain
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: Replace the if-else chain with a switch statement.
+      example: |
+        // Before
+        if kind == "A" { doA() } else if kind == "B" { doB() } else if kind == "C" { doC() }
+        // After
+        switch kind {
+        case "A": doA()
+        case "B": doB()
+        case "C": doC()
+        }
+
+  - id: go-unnecessary-else
+    name: Unnecessary else after return
+    description: >
+      Flags else branches that follow a block ending in return, break,
+      continue, or goto.
+    rationale: >
+      `if err != nil { return err } else { ... }` is noise: the else can
+      never be reached unless the if was false, so the else block can be
+      hoisted to the outer scope and one level of indentation disappears.
+      LLMs over-produce this shape because it reads as "symmetrically
+      handling both cases," but the symmetry is an illusion the early
+      return already broke.
+    severity: warning
+    tags: [control-flow, readability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: revive
+        rule: indent-error-flow
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**"]
+    fix:
+      message: Remove the else and dedent its body.
+      example: |
+        // Before
+        if err != nil {
+            return err
+        } else {
+            process(x)
+        }
+        // After
+        if err != nil {
+            return err
+        }
+        process(x)
+
+  # ── Duplication: LLMs copy-paste instead of abstracting ──
+
+  - id: go-duplicate-code
+    name: Large duplicated code block
+    description: >
+      Flags code blocks of 100+ tokens that are duplicated across functions
+      or files.
+    rationale: >
+      When generating a second similar function, LLMs commonly re-emit the
+      body of the first with small tweaks rather than extracting a shared
+      helper — they have no durable memory of "I already wrote this."
+      Copy-paste duplication is how bugs multiply: a fix applied to one
+      site silently skips the other. The 100-token floor avoids noise from
+      incidentally similar three-line blocks.
+    severity: warning
+    tags: [duplication, maintainability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: dupl
+        rule: dupl
+        settings:
+          threshold: 100
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: >
+        Extract the duplicated body into a shared function. If the copies
+        differ only by a value or a function call, pass that as a parameter.
+      example: |
+        // Before: near-identical handleUserCreate and handleUserUpdate
+        // After: handleUserMutation(ctx, op) with op describing the variant
+
+  # ── Over-abstraction: LLMs invent layers that do nothing ──
+
+  - id: go-long-parameter-list
+    name: Function has too many parameters
+    description: >
+      Flags functions and methods with more than 6 parameters.
+    rationale: >
+      When an LLM realizes a function needs "one more input," it appends a
+      parameter rather than reconsidering the shape. The result is
+      signatures like `Build(ctx, db, logger, user, config, opts, flags, extra)`
+      where callers can't tell which argument is which. Past five or six
+      parameters, the argument almost always wants to be a struct — either
+      a config object or the state of a collaborator.
+    severity: warning
+    tags: [api-design, readability, llm-smell]
+    detector:
+      capability: semgrep
+      version: "^1"
+      config:
+        language: go
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  func $NAME($A, $B, $C, $D, $E, $F, $G, ...) { ... }
+              - pattern: |
+                  func ($RECV $RT) $NAME($A, $B, $C, $D, $E, $F, $G, ...) { ... }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/*_test.go"]
+    fix:
+      message: >
+        Group related parameters into a struct, or split the function so each
+        piece takes only what it needs.
+      example: |
+        // Before
+        func Send(ctx context.Context, client *http.Client, url string,
+                  body []byte, headers map[string]string, timeout time.Duration,
+                  retries int) error { ... }
+        // After
+        type SendRequest struct {
+            URL      string
+            Body     []byte
+            Headers  map[string]string
+            Timeout  time.Duration
+            Retries  int
+        }
+        func Send(ctx context.Context, client *http.Client, req SendRequest) error { ... }
+
+  - id: go-trivial-wrapper
+    name: Trivial one-line wrapper function
+    description: >
+      Flags functions whose body is a single call that forwards all arguments
+      to another function unchanged.
+    rationale: >
+      LLMs often invent a wrapper — `getUser(id) -> db.GetUser(id)` — that
+      adds a second name for the same operation without changing behavior.
+      This is over-abstraction: it inflates the API surface, duplicates the
+      callee's documentation burden, and hides where work actually happens.
+      Call the underlying function directly.
+    severity: warning
+    tags: [abstraction, api-design, llm-smell]
+    detector:
+      capability: semgrep
+      version: "^1"
+      config:
+        language: go
+        pattern-either:
+          - pattern: |
+              func $NAME(...) { $F(...) }
+          - pattern: |
+              func $NAME(...) $RET { return $F(...) }
+          - pattern: |
+              func ($RECV $RT) $NAME(...) { $F(...) }
+          - pattern: |
+              func ($RECV $RT) $NAME(...) $RET { return $F(...) }
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/*_test.go", "**/mocks/**", "**/mock_*.go"]
+    fix:
+      message: >
+        Delete the wrapper and call the underlying function directly.
+        Keep the wrapper only if it adds validation, logging, or a type change.
+      example: |
+        // Before
+        func (s *Service) GetUser(id string) (*User, error) {
+            return s.db.GetUser(id)
+        }
+        // After: call s.db.GetUser(id) at the call site.
+
+  - id: go-nesting-reduce
+    name: Nesting could be reduced with early return
+    description: >
+      Flags if-blocks whose body could be lifted out by inverting the
+      condition and returning early in the alternative branch.
+    rationale: >
+      The `nestingReduce` gocritic check identifies the specific shape
+      `if cond { /* big body */ } else { /* tiny tail */ }` which almost
+      always reads better as `if !cond { /* tiny tail; return */ }`
+      followed by the big body at the outer level. This is the same
+      "flatten the pyramid" refactor that the other nesting rules push
+      toward, but caught at a finer grain.
+    severity: info
+    tags: [nesting, readability, llm-smell]
+    detector:
+      capability: golangci-lint
+      version: "^1"
+      config:
+        linter: gocritic
+        rule: nestingReduce
+        settings:
+          enabled-checks:
+            - nestingReduce
+          settings:
+            nestingReduce:
+              bodyWidth: 5
+    applies_to: ["**/*.go"]
+    excludes: ["**/vendor/**", "**/gen/**", "**/*.pb.go", "**/testdata/**", "**/*_test.go"]
+    fix:
+      message: Invert the condition and return early; dedent the remaining body.
+      example: |
+        // Before
+        func run(x int) error {
+            if x > 0 {
+                // twenty lines of work
+            } else {
+                return errInvalid
+            }
+            return nil
+        }
+        // After
+        func run(x int) error {
+            if x <= 0 {
+                return errInvalid
+            }
+            // twenty lines of work
+            return nil
+        }
