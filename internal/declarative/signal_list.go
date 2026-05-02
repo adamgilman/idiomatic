@@ -6,11 +6,9 @@
 //   - Supports flat lists (semgrep, gosec) and nested two-level lists (eslint)
 //     via the NestedList + ParentFields spec. Parent fields are projected onto
 //     inner items so findings can reference the outer object (e.g. filePath).
-//   - Rule resolution uses four strategies: by_id (pack rule ID == extracted
-//     value), by_input (match against a rule's input field), linter_contains
-//     (primary match + substring disambiguation for tools like golangci-lint
-//     where multiple rules share a linter name), and by_capability (every
-//     finding maps to the first pack rule using this capability — used by
+//   - Rule resolution uses three strategies: by_id (pack rule ID == extracted
+//     value), by_input (match against a rule's input field), and by_capability
+//     (every finding maps to the first pack rule using this capability — used by
 //     single-rule per-linter capabilities like errcheck).
 //   - The tail_after_dot transform strips prefixes like "idio-rules.go-no-panic"
 //     down to "go-no-panic" so semgrep check_ids map to pack rule IDs.
@@ -183,8 +181,6 @@ type ruleResolver struct {
 
 	// Strategy: by_id — pack rule id == extracted value (with optional transform).
 	// Strategy: by_input — extracted value matches rule.Inputs[Field].
-	// Strategy: linter_contains — first try by_input, then disambiguate by
-	// substring-matching SubruleField against the item's MatchIn.
 	// Strategy: by_capability — every finding maps to the first rule (no item
 	// extraction; used by single-rule per-linter capabilities).
 	indexByID    map[string]manifest.Rule
@@ -233,25 +229,6 @@ func (r *ruleResolver) resolve(item gjson.Result) (manifest.Rule, bool) {
 		matches := r.indexByInput[val]
 		if len(matches) == 0 {
 			return manifest.Rule{}, false
-		}
-		return matches[0], true
-	case "linter_contains":
-		matches := r.indexByInput[val]
-		if len(matches) == 0 {
-			return manifest.Rule{}, false
-		}
-		if len(matches) == 1 || r.spec.MatchIn == "" || r.spec.SubruleField == "" {
-			return matches[0], true
-		}
-		text := strings.ToLower(item.Get(r.spec.MatchIn).String())
-		for _, m := range matches {
-			sub, _ := m.Detector.Config[r.spec.SubruleField].(string)
-			if sub == "" {
-				continue
-			}
-			if strings.Contains(text, strings.ToLower(sub)) {
-				return m, true
-			}
 		}
 		return matches[0], true
 	default:

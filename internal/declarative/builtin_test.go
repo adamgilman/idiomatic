@@ -12,8 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/adamgilman/idiomatic/manifest"
 )
 
 // repoCapabilitiesDir returns the absolute path to the top-level
@@ -55,8 +53,12 @@ func TestAllRepoCapabilitiesLoad(t *testing.T) {
 	}
 
 	expected := []string{
-		"semgrep", "gosec", "gitleaks", "golangci-lint", "eslint",
+		"semgrep", "gosec", "gitleaks", "eslint",
 		"git", "file-exists", "file-contains",
+		"revive", "gocritic",
+		"errcheck", "nakedret", "interfacebloat", "contextcheck",
+		"errorlint", "recvcheck", "testpackage", "godot", "nolintlint",
+		"tparallel", "gocognit", "cyclop", "nestif", "funlen", "dupl",
 	}
 	for _, name := range expected {
 		if _, ok := got[name]; !ok {
@@ -90,12 +92,44 @@ func TestAllRepoCapabilitiesLoad(t *testing.T) {
 		}
 	}
 
-	if c := got["golangci-lint"]; c != nil {
-		if c.spec.Spec.Signal.MatchRuleBy.Strategy != "linter_contains" {
-			t.Errorf("golangci-lint match_rule_by.strategy = %q", c.spec.Spec.Signal.MatchRuleBy.Strategy)
+	// Per-linter golangci-lint-backed capabilities. Each must:
+	// - Declare requires.binary == "golangci-lint"
+	// - Set files_as_dirs (golangci-lint expects directories or "./...")
+	// - Pass --path-prefix= in argv (so paths are relative to cwd, not the tmp config dir)
+	// - Use either by_input (multi-rule) or by_capability (single-rule) resolver strategy
+	perLinterCaps := []string{
+		"revive", "gocritic",
+		"errcheck", "nakedret", "interfacebloat", "contextcheck",
+		"errorlint", "recvcheck", "testpackage", "godot", "nolintlint",
+		"tparallel", "gocognit", "cyclop", "nestif", "funlen", "dupl",
+	}
+	for _, name := range perLinterCaps {
+		c := got[name]
+		if c == nil {
+			t.Errorf("missing per-linter capability %q", name)
+			continue
+		}
+		if c.spec.Spec.Requires.Binary != "golangci-lint" {
+			t.Errorf("%s.requires.binary = %q, want golangci-lint", name, c.spec.Spec.Requires.Binary)
 		}
 		if !c.spec.Spec.Run.FilesAsDirs {
-			t.Error("golangci-lint should set files_as_dirs")
+			t.Errorf("%s should set files_as_dirs", name)
+		}
+		hasPathPrefix := false
+		for _, arg := range c.spec.Spec.Run.Argv {
+			if arg == "--path-prefix=" {
+				hasPathPrefix = true
+				break
+			}
+		}
+		if !hasPathPrefix {
+			t.Errorf("%s argv missing --path-prefix=", name)
+		}
+		switch c.spec.Spec.Signal.MatchRuleBy.Strategy {
+		case "by_input", "by_capability":
+			// ok
+		default:
+			t.Errorf("%s match_rule_by.strategy = %q, want by_input or by_capability", name, c.spec.Spec.Signal.MatchRuleBy.Strategy)
 		}
 	}
 
@@ -147,7 +181,6 @@ func TestAllRepoCapabilitiesValidateRule(t *testing.T) {
 		{"semgrep", map[string]any{"language": "go", "pattern": "panic(...)"}},
 		{"gosec", map[string]any{"rule_id": "G101"}},
 		{"gitleaks", map[string]any{"rule_id": "aws-access-token"}},
-		{"golangci-lint", map[string]any{"linter": "govet"}},
 		{"git", map[string]any{"argv": []any{"rev-parse", "HEAD"}, "fire_when": "signal.exit_code != 0"}},
 		{"file-exists", map[string]any{"path": ".gitignore", "fire_when": "signal.exit_code != 0"}},
 		{"file-contains", map[string]any{"path": ".gitignore", "pattern": "\\.env", "fire_when": "signal.exit_code != 0"}},
@@ -166,70 +199,3 @@ func TestAllRepoCapabilitiesValidateRule(t *testing.T) {
 	}
 }
 
-// TestRepoGolangciLintRendersConfigFile is the smoke test for the most
-// complex bundled template. It uses sprig + the custom toYaml helper to
-// merge per-linter settings into the rendered config. If toYaml is missing
-// from the template func map, parsing fails before render and this test
-// catches it.
-func TestRepoGolangciLintRendersConfigFile(t *testing.T) {
-	caps, err := LoadPath(repoCapabilitiesDir(t))
-	if err != nil {
-		t.Fatalf("LoadPath: %v", err)
-	}
-	var gcl *Capability
-	for _, c := range caps {
-		if c.Name() == "golangci-lint" {
-			gcl = c
-			break
-		}
-	}
-	if gcl == nil {
-		t.Fatal("golangci-lint capability not found")
-	}
-
-	rules := []manifest.Rule{
-		{
-			ID:       "go-bare-return",
-			Severity: manifest.SeverityWarning,
-			Detector: manifest.Detector{
-				Capability: "golangci-lint",
-				Config:     map[string]any{"linter": "nakedret"},
-			},
-		},
-		{
-			ID:       "go-no-elseif",
-			Severity: manifest.SeverityWarning,
-			Detector: manifest.Detector{
-				Capability: "golangci-lint",
-				Config: map[string]any{
-					"linter": "gocritic",
-					"rule":   "elseif",
-					"settings": map[string]any{
-						"disabled-checks": []any{"elseif"},
-					},
-				},
-			},
-		},
-	}
-
-	path, err := gcl.renderConfigFile(rules, &runtimeCtx{ProjectRoot: "/tmp", Discovered: map[string]string{}})
-	if err != nil {
-		t.Fatalf("renderConfigFile (toYaml support broken?): %v", err)
-	}
-	defer func() { _ = os.Remove(path) }()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read rendered: %v", err)
-	}
-	got := string(data)
-	if !strings.Contains(got, "nakedret") {
-		t.Errorf("rendered config missing nakedret:\n%s", got)
-	}
-	if !strings.Contains(got, "gocritic") {
-		t.Errorf("rendered config missing gocritic:\n%s", got)
-	}
-	if !strings.Contains(got, "disabled-checks") {
-		t.Errorf("rendered config missing disabled-checks setting:\n%s", got)
-	}
-}
