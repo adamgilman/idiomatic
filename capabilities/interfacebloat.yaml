@@ -40,7 +40,7 @@ spec:
       - stdout
       - --output.text.path
       - /dev/null
-      - --path-prefix=
+      - --path-mode=abs
       - "{files}"
     timeout: 60s
     ok_exit: [1]

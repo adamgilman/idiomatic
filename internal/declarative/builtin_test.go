@@ -95,7 +95,7 @@ func TestAllRepoCapabilitiesLoad(t *testing.T) {
 	// Per-linter golangci-lint-backed capabilities. Each must:
 	// - Declare requires.binary == "golangci-lint"
 	// - Set files_as_dirs (golangci-lint expects directories or "./...")
-	// - Pass --path-prefix= in argv (so paths are relative to cwd, not the tmp config dir)
+	// - Pass --path-mode=abs in argv (so paths are absolute, not relative to the tmp config dir)
 	// - Use either by_input (multi-rule) or by_capability (single-rule) resolver strategy
 	perLinterCaps := []string{
 		"revive", "gocritic",
@@ -115,15 +115,15 @@ func TestAllRepoCapabilitiesLoad(t *testing.T) {
 		if !c.spec.Spec.Run.FilesAsDirs {
 			t.Errorf("%s should set files_as_dirs", name)
 		}
-		hasPathPrefix := false
+		hasPathMode := false
 		for _, arg := range c.spec.Spec.Run.Argv {
-			if arg == "--path-prefix=" {
-				hasPathPrefix = true
+			if arg == "--path-mode=abs" {
+				hasPathMode = true
 				break
 			}
 		}
-		if !hasPathPrefix {
-			t.Errorf("%s argv missing --path-prefix=", name)
+		if !hasPathMode {
+			t.Errorf("%s argv missing --path-mode=abs", name)
 		}
 		switch c.spec.Spec.Signal.MatchRuleBy.Strategy {
 		case "by_input", "by_capability":

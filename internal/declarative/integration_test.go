@@ -9,12 +9,13 @@ package declarative
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/adamgilman/idiomatic/internal/engine"
-	
+
 	"github.com/adamgilman/idiomatic/manifest"
 )
 
@@ -385,6 +386,146 @@ func TestEslint_Analyze_E2E_FakeBinary(t *testing.T) {
 	}
 	if f.StartLine != 4 {
 		t.Errorf("StartLine = %d", f.StartLine)
+	}
+}
+
+// TestPerLinter_Errcheck verifies the single-rule per-linter capability shape:
+// errcheck capability runs golangci-lint -E errcheck, finds the unchecked
+// error in the fixture, and attributes the finding to the pack rule that
+// uses the errcheck capability. Path must be relative (no `..` prefix) —
+// regression guard for Bug #1.
+func TestPerLinter_Errcheck(t *testing.T) {
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		t.Skip("golangci-lint not available on PATH")
+	}
+
+	fixture := filepath.Join("testdata", "per-linter-errcheck")
+	abs, err := filepath.Abs(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prevWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(prevWd) }()
+	if err := os.Chdir(abs); err != nil {
+		t.Fatal(err)
+	}
+
+	caps, err := LoadPath(repoCapabilitiesDir(t))
+	if err != nil {
+		t.Fatalf("LoadPath: %v", err)
+	}
+	var errcheckCap *Capability
+	for _, c := range caps {
+		if c.Name() == "errcheck" {
+			errcheckCap = c
+			break
+		}
+	}
+	if errcheckCap == nil {
+		t.Fatal("errcheck capability not found")
+	}
+
+	rules := []manifest.Rule{
+		{
+			ID: "go-check-error-return",
+			Detector: manifest.Detector{
+				Capability: "errcheck",
+				Config:     map[string]any{},
+			},
+			Severity: manifest.SeverityError,
+		},
+	}
+
+	findings, err := errcheckCap.Analyze(context.Background(), engine.AnalysisRequest{
+		Files: []string{filepath.Join(abs, "main.go")},
+		Rules: rules,
+	})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("got %d findings, want 1: %+v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.RuleID != "go-check-error-return" {
+		t.Errorf("RuleID = %q, want go-check-error-return", f.RuleID)
+	}
+	if strings.HasPrefix(f.File, "..") {
+		t.Errorf("path has unexpected `..` prefix: %q (Bug #1 regression)", f.File)
+	}
+}
+
+// TestPerLinter_Revive_AtSourceRestriction verifies that the revive
+// capability configures revive to run ONLY the rules pack rules ask for.
+// The fixture contains code that would trigger several revive default rules
+// (package-comments, unused-parameter, etc.), but the pack only enables
+// `exported`, so we expect findings to be ONLY from that rule. This is the
+// regression test for Bug #2 (misattribution): noise rules cannot fire
+// because they are not enabled at source.
+func TestPerLinter_Revive_AtSourceRestriction(t *testing.T) {
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		t.Skip("golangci-lint not available on PATH")
+	}
+
+	fixture := filepath.Join("testdata", "per-linter-revive")
+	abs, err := filepath.Abs(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prevWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(prevWd) }()
+	if err := os.Chdir(abs); err != nil {
+		t.Fatal(err)
+	}
+
+	caps, err := LoadPath(repoCapabilitiesDir(t))
+	if err != nil {
+		t.Fatalf("LoadPath: %v", err)
+	}
+	var reviveCap *Capability
+	for _, c := range caps {
+		if c.Name() == "revive" {
+			reviveCap = c
+			break
+		}
+	}
+	if reviveCap == nil {
+		t.Fatal("revive capability not found")
+	}
+
+	rules := []manifest.Rule{
+		{
+			ID: "go-require-doc-comment",
+			Detector: manifest.Detector{
+				Capability: "revive",
+				Config:     map[string]any{"rule": "exported"},
+			},
+			Severity: manifest.SeverityWarning,
+		},
+	}
+
+	findings, err := reviveCap.Analyze(context.Background(), engine.AnalysisRequest{
+		Files: []string{filepath.Join(abs, "main.go")},
+		Rules: rules,
+	})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+
+	// At-source restriction means only `exported` fires. Other revive
+	// default rules (package-comments, etc.) are NOT enabled.
+	for _, f := range findings {
+		if f.RuleID != "go-require-doc-comment" {
+			t.Errorf("unexpected rule ID %q in finding (Bug #2 regression — at-source restriction failed): %+v", f.RuleID, f)
+		}
+		if strings.HasPrefix(f.File, "..") {
+			t.Errorf("path has unexpected `..` prefix: %q (Bug #1 regression)", f.File)
+		}
+	}
+	if len(findings) == 0 {
+		t.Error("expected at least one finding from revive's exported rule")
 	}
 }
 
