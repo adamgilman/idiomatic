@@ -231,11 +231,13 @@ type MatchRuleBy struct {
 	// extracted value; "by_input" — match the rule whose inputs[Field] equals
 	// the extracted value; "linter_contains" — multiple rules can share the
 	// same primary id (linter), disambiguate by substring-matching SubruleField
-	// against the entry's MatchIn field.
+	// against the entry's MatchIn field; "by_capability" — every finding maps
+	// to the first pack rule using this capability (ignores the JSON item;
+	// used by single-rule per-linter capabilities like errcheck).
 	Strategy string `yaml:"strategy,omitempty"`
 
-	From      string `yaml:"from"`                // gjson path on the item
-	Transform string `yaml:"transform,omitempty"` // identity (default) | tail_after_dot
+	From      string `yaml:"from"`                // gjson path on the item (not required for by_capability)
+	Transform string `yaml:"transform,omitempty"` // identity (default) | tail_after_dot | prefix_before_colon
 
 	// by_input strategy
 	Field string `yaml:"field,omitempty"` // rule input field to match against
