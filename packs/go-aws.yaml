@@ -26,7 +26,7 @@ pack:
       cancellation. These rules enforce the patterns that principal engineers
       learn after their first production incident with each AWS service.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-aws.yaml
   tags:
     language: go

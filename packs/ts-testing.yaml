@@ -11,7 +11,7 @@ pack:
     anti-patterns, missing assertions, flaky patterns, and focused
     tests that give false confidence and hide real bugs.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-testing.yaml
 
 rules:

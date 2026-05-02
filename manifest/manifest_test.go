@@ -45,8 +45,8 @@ func TestLoadFile_ValidManifest(t *testing.T) {
 	if m.Pack.Version != "0.1.0" {
 		t.Errorf("pack.version = %q, want %q", m.Pack.Version, "0.1.0")
 	}
-	if m.Pack.License != "Proprietary" {
-		t.Errorf("pack.license = %q, want %q", m.Pack.License, "Proprietary")
+	if m.Pack.License != "Apache-2.0" {
+		t.Errorf("pack.license = %q, want %q", m.Pack.License, "Apache-2.0")
 	}
 
 	// Check rules.

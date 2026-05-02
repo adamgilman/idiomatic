@@ -26,7 +26,7 @@ pack:
       connection pool exhaustion issues that only show up under production
       load.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-httpclient.yaml
   tags:
     language: go

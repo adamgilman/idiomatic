@@ -28,7 +28,7 @@ pack:
       availability gaps like missing PodDisruptionBudgets that take down
       all replicas during routine node drains.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/k8s-manifests.yaml
   tags:
     vendor: kubernetes

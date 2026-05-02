@@ -131,7 +131,7 @@ pack:
 | `version` | string | yes | Semver version of this pack release. Bump on every change. |
 | `description` | string | yes | What this pack enforces. |
 | `maintainer` | string | yes | Who maintains this pack (org, team, or individual). |
-| `license` | string | no | SPDX license identifier or `Proprietary`. |
+| `license` | string | no | SPDX license identifier. |
 | `homepage` | string | no | URL to documentation or source. |
 | `tags` | object | no | Free-form key-value metadata for discoverability. Conventional keys: `language`, `category`, `vendor`, `architecture`. |
 
@@ -426,7 +426,7 @@ pack:
   version: 1.0.0
   description: Repository hygiene rules for AI-driven coding workflows.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   tags:
     category: workflow
 

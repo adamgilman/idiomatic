@@ -29,8 +29,6 @@ func TestRootHasSubcommands(t *testing.T) {
 
 	expected := map[string]bool{
 		"version": false,
-		"config":  false,
-		"auth":    false,
 	}
 
 	for _, sub := range subcommands {

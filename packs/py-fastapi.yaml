@@ -25,7 +25,7 @@ pack:
       security boundaries so your service behaves like production code from
       day one.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-fastapi.yaml
   tags:
     language: python

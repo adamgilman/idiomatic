@@ -29,7 +29,7 @@ pack:
       you can't catch with a linter but can enforce
       programmatically.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ai-workflow.yaml
   tags:
     category: workflow

@@ -29,7 +29,7 @@ pack:
       lifecycle.prevent_destroy. If it would fail a SOC 2 audit or cause
       a page, there is a rule for it.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/terraform-aws.yaml
   tags:
     vendor: terraform

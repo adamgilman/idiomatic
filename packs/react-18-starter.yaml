@@ -12,7 +12,7 @@ pack:
     deprecated API usage (ReactDOM.render), and enforces JSX correctness and
     performance patterns suited for concurrent mode.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/react-18-starter.yaml
 
 rules:

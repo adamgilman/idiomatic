@@ -26,7 +26,7 @@ pack:
       misuse or file permissions that require semantic understanding. Each
       rule maps to a gosec rule ID (G1xx-G6xx) with our own fix guidance.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-gosec.yaml
   tags:
     language: go

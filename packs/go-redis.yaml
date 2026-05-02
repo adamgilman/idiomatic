@@ -27,7 +27,7 @@ pack:
       targets a real production failure mode specific to go-redis usage
       patterns.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-redis.yaml
   tags:
     language: go

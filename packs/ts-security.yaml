@@ -26,7 +26,7 @@ pack:
       Each rule maps to a specific OWASP category and prevents a concrete
       exploit pattern — not style nits, real attack surface.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-security.yaml
   tags:
     language: typescript

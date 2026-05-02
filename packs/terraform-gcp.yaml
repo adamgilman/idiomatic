@@ -27,7 +27,7 @@ pack:
       nodes. If it would fail a CIS GCP Benchmark audit or cause a
       page, there is a rule for it.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/terraform-gcp.yaml
   tags:
     vendor: terraform

@@ -7,7 +7,7 @@ pack:
   version: 0.1.0
   description: Foundational test-driven development enforcement for Go projects.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-tdd-starter.yaml
 
 rules:

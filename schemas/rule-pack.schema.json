@@ -57,8 +57,8 @@
         },
         "license": {
           "type": "string",
-          "description": "SPDX license identifier or 'Proprietary'.",
-          "examples": ["MIT", "Apache-2.0", "Proprietary"]
+          "description": "SPDX license identifier.",
+          "examples": ["MIT", "Apache-2.0", "BSD-3-Clause"]
         },
         "homepage": {
           "type": "string",

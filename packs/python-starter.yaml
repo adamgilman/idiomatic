@@ -12,7 +12,7 @@ pack:
     needs to stay idiomatic from day one, without requiring team
     discussion to adopt.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/python-starter.yaml
 
 rules:

@@ -13,7 +13,7 @@ pack:
     These are not stylistic nits — each one is a signal that code should
     be reshaped before the next change lands on top of it.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-llm-spaghetti.yaml
 
 rules:

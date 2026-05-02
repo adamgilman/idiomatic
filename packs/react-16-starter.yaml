@@ -11,7 +11,7 @@ pack:
     and functional components. Enforces hooks discipline, JSX correctness,
     component stability, and safety patterns.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/react-16-starter.yaml
 
 rules:

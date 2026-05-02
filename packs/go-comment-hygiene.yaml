@@ -11,7 +11,7 @@ pack:
     exported symbols are documented, comments follow Go conventions,
     and stale or meaningless comments don't accumulate.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-comment-hygiene.yaml
 
 rules:

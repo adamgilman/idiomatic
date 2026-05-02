@@ -27,7 +27,7 @@ pack:
       incident pattern -- the kind of bug that works fine in dev but fails
       under load or after idle periods.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-grpc.yaml
   tags:
     language: go

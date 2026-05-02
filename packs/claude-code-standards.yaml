@@ -27,7 +27,7 @@ pack:
       specific to Claude Code features (CLAUDE.md, hooks, etc.),
       not general AI workflow hygiene.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/claude-code-standards.yaml
   tags:
     category: workflow

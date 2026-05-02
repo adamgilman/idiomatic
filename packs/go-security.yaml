@@ -26,7 +26,7 @@ pack:
       exploitable pattern rather than general advice, so the signal-to-noise
       ratio stays high.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-security.yaml
   tags:
     language: go

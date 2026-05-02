@@ -28,7 +28,7 @@ pack:
       a full process crash, and CPU spin loops. Each rule addresses a
       gap between "works in dev" and "survives in production."
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-worker.yaml
   tags:
     language: go

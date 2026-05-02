@@ -27,7 +27,7 @@ pack:
       blog's concurrency articles that the race detector can't catch
       statically.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-concurrency.yaml
   tags:
     language: go

@@ -28,7 +28,7 @@ pack:
       Jaeger trace wondering why a span is missing, these rules catch the
       cause at code review time.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-otel.yaml
   tags:
     language: typescript

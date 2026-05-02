@@ -11,7 +11,7 @@ pack:
     Ensures exported APIs are documented, JSDoc is accurate, and
     stale or meaningless comments don't accumulate.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/ts-comment-hygiene.yaml
 
 rules:

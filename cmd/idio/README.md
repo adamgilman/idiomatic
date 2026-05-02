@@ -15,8 +15,6 @@ idio
 └── version       # Print version info (injected via ldflags)
 ```
 
-Hidden (placeholder for future use): `auth`, `config`.
-
 ## Files
 
 ### `main.go`
@@ -33,12 +31,6 @@ The most important command. Three modes based on `--format`:
 
 ### `cmd/manifest.go`
 `validate` and `list` subcommands for working with rule manifests without running analysis.
-
-### `cmd/auth.go`
-Placeholder for future authentication. Hidden from `--help`.
-
-### `cmd/config.go`
-Placeholder for future configuration management. Hidden from `--help`.
 
 ### `cmd/version.go`
 Version output. `Version`, `Commit`, and `Date` set via ldflags at build time.

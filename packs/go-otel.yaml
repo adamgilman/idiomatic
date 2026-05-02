@@ -33,7 +33,7 @@ pack:
       of stuff that works fine in happy-path testing but breaks your
       observability at 3am when you need it most.
   maintainer: idiomatic
-  license: Proprietary
+  license: Apache-2.0
   homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/go-otel.yaml
   tags:
     language: go
