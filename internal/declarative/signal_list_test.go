@@ -138,3 +138,25 @@ func TestExtractRuleID_TailAfterDot(t *testing.T) {
 		}
 	}
 }
+
+func TestTransformRuleID_PrefixBeforeColon(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "revive single-word rule", raw: "exported: should have a comment", want: "exported"},
+		{name: "revive multi-word rule", raw: "package-comments: should have a package comment", want: "package-comments"},
+		{name: "no colon — passthrough", raw: "no rule prefix here", want: "no rule prefix here"},
+		{name: "leading whitespace stripped", raw: " exported : msg", want: "exported"},
+		{name: "empty input — passthrough", raw: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := transformRuleID(tt.raw, "prefix_before_colon")
+			if got != tt.want {
+				t.Errorf("transformRuleID(%q, prefix_before_colon) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}

@@ -12,6 +12,9 @@
 //     golangci-lint where multiple rules share a linter name).
 //   - The tail_after_dot transform strips prefixes like "idio-rules.go-no-panic"
 //     down to "go-no-panic" so semgrep check_ids map to pack rule IDs.
+//   - The prefix_before_colon transform extracts the substring before the first
+//     ":" (whitespace-trimmed), used by revive output like
+//     "exported: should have a comment" to yield just "exported".
 package declarative
 
 import (
@@ -250,6 +253,11 @@ func transformRuleID(raw, transform string) string {
 	case "tail_after_dot":
 		if idx := strings.LastIndex(raw, "."); idx >= 0 {
 			return raw[idx+1:]
+		}
+		return raw
+	case "prefix_before_colon":
+		if idx := strings.IndexByte(raw, ':'); idx >= 0 {
+			return strings.TrimSpace(raw[:idx])
 		}
 		return raw
 	default:
