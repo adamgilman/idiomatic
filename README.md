@@ -64,6 +64,9 @@ capabilities:
     path:
       - capabilities/semgrep.yaml
       - capabilities/eslint.yaml
+      - capabilities/revive.yaml
+      - capabilities/errcheck.yaml
+      # See capabilities/ for all per-linter wrappers.
 
 packs:
   - repo: https://github.com/adamgilman/idiomatic
@@ -186,12 +189,13 @@ Capabilities are YAML wrappers around external analysis tools. See [`capabilitie
 |---|---|---|
 | `eslint` | ESLint 9 | TypeScript, React, JSX analysis |
 | `semgrep` | Semgrep | Pattern matching across languages |
-| `golangci-lint` | golangci-lint | Go linter aggregator |
 | `gosec` | gosec | Go security scanner |
 | `gitleaks` | gitleaks | Secret and credential detection |
 | `git` | git | Git repository checks |
 | `file-exists` | stat | File presence checks |
 | `file-contains` | grep | File content checks |
+| `revive`, `gocritic` | golangci-lint | Multi-rule Go linters (one capability each) |
+| `errcheck`, `nakedret`, `interfacebloat`, `contextcheck`, `errorlint`, `recvcheck`, `testpackage`, `godot`, `nolintlint`, `tparallel`, `gocognit`, `cyclop`, `nestif`, `funlen`, `dupl` | golangci-lint | Single-rule Go linters (one capability each) |
 
 ## Writing Custom Rules and Capabilities
 
