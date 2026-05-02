@@ -13,7 +13,7 @@ For the formal field reference, see [`spec/rule-pack.md`](../spec/rule-pack.md).
 
 - The rule pack YAML format is [documented in the spec](../spec/rule-pack.md). Skim it first.
 - An editor with [`yaml-language-server`](https://github.com/redhat-developer/yaml-language-server) is highly recommended — autocomplete and inline validation make rule writing much easier.
-- The capability your rules will target must be declared in your `.idiomatic.yaml` config. The canonical 8 capabilities (semgrep, eslint, golangci-lint, gosec, gitleaks, git, file-exists, file-contains) ship with the official idiomatic repo at `https://github.com/adamgilman/idiomatic`. Custom or community capabilities are referenced the same way — add their repo and path to your config.
+- The capability your rules will target must be declared in your `.idiomatic.yaml` config. The official capabilities (semgrep, eslint, gosec, gitleaks, git, file-exists, file-contains, and per-linter Go capabilities like revive, errcheck, gocritic, ...) ship with the official idiomatic repo at `https://github.com/adamgilman/idiomatic`. Custom or community capabilities are referenced the same way — add their repo and path to your config.
 - You'll be testing against real source files, so install the underlying tool too. For this guide we'll use semgrep — install it with `uv tool install semgrep` (or `brew install semgrep`).
 
 ## Step 1: Pick a convention to enforce
@@ -35,7 +35,8 @@ Decide which capability runs each rule. The match is usually obvious from the ki
 |---|---|
 | Semantic pattern matching in source code | `semgrep` |
 | ECMAScript/TypeScript/React linting | `eslint` |
-| Go linting (govet, gocritic, nakedret, ...) | `golangci-lint` |
+| Go linting (multi-rule: revive, gocritic) | `revive`, `gocritic` (per-linter capability) |
+| Go linting (single-rule: errcheck, nakedret, ...) | `errcheck`, `nakedret`, ... (per-linter capability) |
 | Go security analysis | `gosec` |
 | Secret scanning | `gitleaks` |
 | Git repository state (current branch, worktree, ...) | `git` |
