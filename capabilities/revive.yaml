@@ -29,7 +29,7 @@ spec:
       template: |
         version: "2"
         linters:
-          disable-all: true
+          default: none
           enable: [revive]
         linters-settings:
           revive:

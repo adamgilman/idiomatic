@@ -521,6 +521,7 @@ rules:
       - go
     detector:
       capability: recvcheck
+      config: {}
     applies_to:
       - "**/*.go"
     excludes:
@@ -548,6 +549,7 @@ rules:
       - go
     detector:
       capability: contextcheck
+      config: {}
     applies_to:
       - "**/*.go"
     excludes:
@@ -574,6 +576,7 @@ rules:
       - go
     detector:
       capability: errorlint
+      config: {}
     applies_to:
       - "**/*.go"
     excludes:
@@ -599,6 +602,7 @@ rules:
       - go
     detector:
       capability: errcheck
+      config: {}
     applies_to:
       - "**/*.go"
     excludes:
@@ -682,6 +686,7 @@ rules:
       - go
     detector:
       capability: testpackage
+      config: {}
     applies_to:
       - "**/*.go"
     excludes:

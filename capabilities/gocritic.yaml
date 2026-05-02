@@ -29,11 +29,11 @@ spec:
       template: |
         version: "2"
         linters:
-          disable-all: true
+          default: none
           enable: [gocritic]
         linters-settings:
           gocritic:
-            disable-all: true
+            default: none
             enabled-checks:
         {{- range .Rules }}
               - {{ index .Inputs "rule" }}

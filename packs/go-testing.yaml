@@ -400,6 +400,7 @@ rules:
     tags: [testing, performance]
     detector:
       capability: tparallel
+      config: {}
     applies_to: ["**/*_test.go"]
     excludes: ["**/vendor/**"]
     fix:
