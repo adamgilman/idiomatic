@@ -49,9 +49,8 @@ rules:
     severity: warning
     tags: [documentation, conventions, godoc]
     detector:
-      capability: golangci-lint
+      capability: revive
       config:
-        linter: revive
         rule: exported
     applies_to:
       - "**/*.go"
@@ -103,9 +102,8 @@ rules:
     severity: warning
     tags: [documentation, conventions, godoc]
     detector:
-      capability: golangci-lint
+      capability: revive
       config:
-        linter: revive
         rule: package-comments
     applies_to:
       - "**/*.go"
@@ -161,10 +159,7 @@ rules:
     severity: warning
     tags: [documentation, style, conventions]
     detector:
-      capability: golangci-lint
-      config:
-        linter: godot
-        rule: godot
+      capability: godot
     applies_to:
       - "**/*.go"
     excludes:
@@ -212,9 +207,8 @@ rules:
     severity: warning
     tags: [style, formatting, conventions]
     detector:
-      capability: golangci-lint
+      capability: revive
       config:
-        linter: revive
         rule: comment-spacings
     applies_to:
       - "**/*.go"
@@ -269,10 +263,7 @@ rules:
     severity: warning
     tags: [lint-hygiene, maintainability, conventions]
     detector:
-      capability: golangci-lint
-      config:
-        linter: nolintlint
-        rule: nolintlint
+      capability: nolintlint
     applies_to:
       - "**/*.go"
     excludes:
