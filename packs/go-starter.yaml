@@ -463,10 +463,8 @@ rules:
       - readability
       - go
     detector:
-      capability: golangci-lint
+      capability: nakedret
       config:
-        linter: nakedret
-        rule: nakedret
         settings:
           max-func-lines: 5
     applies_to:
@@ -493,10 +491,8 @@ rules:
       - design
       - go
     detector:
-      capability: golangci-lint
+      capability: interfacebloat
       config:
-        linter: interfacebloat
-        rule: interfacebloat
         settings:
           max: 5
     applies_to:
@@ -524,10 +520,7 @@ rules:
       - naming
       - go
     detector:
-      capability: golangci-lint
-      config:
-        linter: recvcheck
-        rule: recvcheck
+      capability: recvcheck
     applies_to:
       - "**/*.go"
     excludes:
@@ -554,10 +547,7 @@ rules:
       - context
       - go
     detector:
-      capability: golangci-lint
-      config:
-        linter: contextcheck
-        rule: contextcheck
+      capability: contextcheck
     applies_to:
       - "**/*.go"
     excludes:
@@ -583,10 +573,7 @@ rules:
       - errors
       - go
     detector:
-      capability: golangci-lint
-      config:
-        linter: errorlint
-        rule: errorlint
+      capability: errorlint
     applies_to:
       - "**/*.go"
     excludes:
@@ -611,9 +598,7 @@ rules:
       - errors
       - go
     detector:
-      capability: golangci-lint
-      config:
-        linter: errcheck
+      capability: errcheck
     applies_to:
       - "**/*.go"
     excludes:
@@ -640,9 +625,8 @@ rules:
       - documentation
       - go
     detector:
-      capability: golangci-lint
+      capability: revive
       config:
-        linter: revive
         rule: exported
     applies_to:
       - "**/*.go"
@@ -670,9 +654,8 @@ rules:
       - naming
       - go
     detector:
-      capability: golangci-lint
+      capability: revive
       config:
-        linter: revive
         rule: stutters
     applies_to:
       - "**/*.go"
@@ -698,10 +681,7 @@ rules:
       - testing
       - go
     detector:
-      capability: golangci-lint
-      config:
-        linter: testpackage
-        rule: testpackage
+      capability: testpackage
     applies_to:
       - "**/*.go"
     excludes:
