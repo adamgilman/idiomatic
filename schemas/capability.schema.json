@@ -373,36 +373,27 @@
 
     "matchRuleBy": {
       "type": "object",
-      "required": ["from"],
       "additionalProperties": false,
       "properties": {
         "strategy": {
           "type": "string",
-          "enum": ["by_id", "by_input", "linter_contains"],
+          "enum": ["by_id", "by_input", "by_capability"],
           "default": "by_id",
-          "description": "How each item names the rule it belongs to. by_id = pack rule id equals the extracted value. by_input = extracted value matches rule.config[field]. linter_contains = first by_input, then disambiguate by substring-matching subrule_field against the entry's match_in field."
+          "description": "How each item names the rule it belongs to. by_id = pack rule id equals the extracted value. by_input = extracted value matches rule.config[field]. by_capability = every finding maps to the first pack rule using this capability (no item extraction; used by single-rule per-linter capabilities)."
         },
         "from": {
           "type": "string",
-          "description": "gjson path on the inner item that produces the routing key."
+          "description": "gjson path on the inner item that produces the routing key. Required for by_id and by_input strategies; ignored for by_capability."
         },
         "transform": {
           "type": "string",
-          "enum": ["identity", "tail_after_dot"],
+          "enum": ["identity", "tail_after_dot", "prefix_before_colon"],
           "default": "identity",
-          "description": "tail_after_dot strips everything up to the last '.' (e.g. 'tmp.go-no-panic' -> 'go-no-panic')."
+          "description": "tail_after_dot strips everything up to the last '.' (e.g. 'tmp.go-no-panic' -> 'go-no-panic'). prefix_before_colon extracts the substring before the first ':' with whitespace trimmed (e.g. 'exported: should have a comment' -> 'exported')."
         },
         "field": {
           "type": "string",
           "description": "(by_input strategy) Rule input field to look up against the extracted value."
-        },
-        "subrule_field": {
-          "type": "string",
-          "description": "(linter_contains strategy) Rule input field carrying the sub-rule name."
-        },
-        "match_in": {
-          "type": "string",
-          "description": "(linter_contains strategy) gjson path on the inner item to substring-search for the sub-rule name."
         }
       }
     },

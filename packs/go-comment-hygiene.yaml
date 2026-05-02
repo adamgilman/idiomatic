@@ -160,7 +160,6 @@ rules:
     tags: [documentation, style, conventions]
     detector:
       capability: godot
-      config: {}
     applies_to:
       - "**/*.go"
     excludes:
@@ -265,7 +264,6 @@ rules:
     tags: [lint-hygiene, maintainability, conventions]
     detector:
       capability: nolintlint
-      config: {}
     applies_to:
       - "**/*.go"
     excludes:

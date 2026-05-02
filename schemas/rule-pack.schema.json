@@ -139,7 +139,7 @@
       "type": "object",
       "title": "Detector",
       "description": "Routes the rule to a capability and supplies its inputs.",
-      "required": ["capability", "config"],
+      "required": ["capability"],
       "additionalProperties": false,
       "properties": {
         "capability": {
@@ -154,8 +154,7 @@
         },
         "config": {
           "type": "object",
-          "description": "Per-rule inputs. The shape is defined by the named capability's spec.inputs schema. Validation happens at registry load time using the loaded capability's contract.",
-          "minProperties": 1
+          "description": "Per-rule inputs. The shape is defined by the named capability's spec.inputs schema. Optional — single-rule per-linter capabilities (errcheck, nakedret, etc.) take no inputs. Validation of required inputs happens at registry load time using the loaded capability's contract."
         }
       }
     },
