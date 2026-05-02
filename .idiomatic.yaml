@@ -6,7 +6,6 @@ capabilities:
     path:
       - capabilities/semgrep.yaml
       - capabilities/eslint.yaml
-      - capabilities/golangci-lint.yaml      # kept temporarily; removed in T13
       - capabilities/revive.yaml
       - capabilities/gocritic.yaml
       - capabilities/errcheck.yaml
