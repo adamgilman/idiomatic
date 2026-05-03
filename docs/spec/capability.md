@@ -379,7 +379,7 @@ signal:
   format: json
   list: results              # gjson path to the outer array; "" for top-level array
   match_rule_by:
-    strategy: by_id          # by_id | by_input | linter_contains
+    strategy: by_id          # by_id | by_input | by_capability
     from: check_id           # gjson path on the inner item
     transform: tail_after_dot
   fields:
@@ -414,7 +414,20 @@ signal:
 |---|---|
 | `by_id` (default) | Pack rule id equals the value extracted from `from`. |
 | `by_input` | Extracted value matches `rule.config[field]`. Used when the rule references the upstream tool's id (e.g. `gosec` rule_id `G101`). |
-| `linter_contains` | First `by_input`, then disambiguate by substring-matching `subrule_field` against the entry's `match_in` field. Used by `golangci-lint`, where multiple rules can target the same linter. |
+| `by_capability` | Every finding emitted by the tool routes to the first pack rule that targets this capability. Used by single-rule per-linter capabilities (`errcheck`, `nakedret`, etc.) where the linter has no sub-rules to disambiguate. |
+
+### `by_capability`
+
+Maps every finding emitted by the tool to the first pack rule that targets this
+capability. Used by single-rule per-linter capabilities (`errcheck`, `nakedret`,
+etc.) where the linter has no sub-rules to disambiguate.
+
+If multiple pack rules target the same single-rule capability (e.g. two
+different packs both wrap `errcheck`), findings attribute to the first by
+deterministic load order.
+
+This strategy ignores the JSON item entirely — `match_rule_by.from` is not
+required (and is ignored if present).
 
 ##### Transforms
 
@@ -422,6 +435,14 @@ signal:
 |---|---|
 | `identity` (default) | Use the value as-is. |
 | `tail_after_dot` | Strip everything up to the last `.`. Used by semgrep, whose check_ids are prefixed with the temp config dir name. |
+| `prefix_before_colon` | Returns the substring before the first `:` in the input, with surrounding whitespace trimmed. Used by linters like `revive` that embed the rule name as a prefix in their output text — `"exported: should have a comment"` becomes `"exported"`. |
+
+### `prefix_before_colon`
+
+Returns the substring before the first `:` in the input, with surrounding
+whitespace trimmed. Used by linters like `revive` that embed the rule name as
+a prefix in their output text — `"exported: should have a comment"` becomes
+`"exported"`.
 
 #### Scalar signal
 

@@ -229,20 +229,16 @@ type SignalSpec struct {
 type MatchRuleBy struct {
 	// Strategy: "by_id" (default) — match the rule whose pack id equals the
 	// extracted value; "by_input" — match the rule whose inputs[Field] equals
-	// the extracted value; "linter_contains" — multiple rules can share the
-	// same primary id (linter), disambiguate by substring-matching SubruleField
-	// against the entry's MatchIn field.
+	// the extracted value; "by_capability" — every finding maps to the first
+	// pack rule using this capability (ignores the JSON item; used by
+	// single-rule per-linter capabilities like errcheck).
 	Strategy string `yaml:"strategy,omitempty"`
 
-	From      string `yaml:"from"`                // gjson path on the item
-	Transform string `yaml:"transform,omitempty"` // identity (default) | tail_after_dot
+	From      string `yaml:"from"`                // gjson path on the item (not required for by_capability)
+	Transform string `yaml:"transform,omitempty"` // identity (default) | tail_after_dot | prefix_before_colon
 
 	// by_input strategy
 	Field string `yaml:"field,omitempty"` // rule input field to match against
-
-	// linter_contains strategy
-	SubruleField string `yaml:"subrule_field,omitempty"` // rule input field carrying the sub-rule name
-	MatchIn      string `yaml:"match_in,omitempty"`      // gjson path containing the substring to match
 }
 
 // ScalarField describes one field exposed on a scalar signal.

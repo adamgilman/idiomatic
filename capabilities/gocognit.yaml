@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: gocognit
+  version: 1.0.0
+  description: gocognit Go linter (run via golangci-lint)
+
+spec:
+  applies_to_files:
+    extensions: [".go"]
+
+  requires:
+    binary: golangci-lint
+    install: "go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"
+
+  inputs:
+    settings:
+      type: any
+      description: Optional linter-specific settings forwarded to linters-settings.gocognit
+
+  run:
+    config_file:
+      path: "{tmp}/idio-gocognit.yml"
+      template: |
+        version: "2"
+        linters:
+          default: none
+          enable: [gocognit]
+        {{- range .Rules }}{{ with index .Inputs "settings" }}
+        linters-settings:
+          gocognit:
+        {{ . | toYaml | indent 4 }}
+        {{- end }}{{- end }}
+    argv:
+      - run
+      - --config
+      - "{config_file}"
+      - --output.json.path
+      - stdout
+      - --output.text.path
+      - /dev/null
+      - --path-mode=abs
+      - "{files}"
+    timeout: 60s
+    ok_exit: [1]
+    output: stdout
+    files_as_dirs: true
+
+  signal:
+    shape: list
+    source: stdout
+    format: json
+    list: Issues
+    match_rule_by:
+      strategy: by_capability
+    fields:
+      file: Pos.Filename
+      line: Pos.Line
+      col: Pos.Column
+      message: Text

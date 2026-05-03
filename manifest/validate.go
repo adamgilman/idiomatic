@@ -244,17 +244,14 @@ func validateRule(r *Rule, prefix, filePath string) ValidationErrors {
 			RuleID:     ruleID,
 			Field:      prefix + ".detector.capability",
 			Message:    "detector.capability is required",
-			Suggestion: "add detector.capability and detector.config",
-		})
-	} else if len(r.Detector.Config) == 0 {
-		errs = append(errs, ValidationError{
-			File:       filePath,
-			RuleID:     ruleID,
-			Field:      prefix + ".detector.config",
-			Message:    "detector.config is required",
-			Suggestion: "add a config block with tool-specific settings",
+			Suggestion: "add detector.capability",
 		})
 	}
+	// detector.config is optional. Single-rule per-linter capabilities (errcheck,
+	// nakedret, etc.) need no config inputs from the pack rule, so requiring a
+	// non-empty config here would force authors to write `config: {}` placeholder
+	// blocks. The capability layer validates that required inputs (per the
+	// capability YAML's inputs schema) are actually present at invocation time.
 
 	// Optional version constraint on the capability. Validated for syntax
 	// here; the actual capability lookup happens at registry load time so

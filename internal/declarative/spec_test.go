@@ -225,3 +225,54 @@ spec:
       stderr:    { from: stderr, transform: trim }
       exit_code: { from: exit }
 `
+
+// TestValidateSpec_ByCapability_NoFromAccepted confirms a list-mode capability
+// with strategy=by_capability is accepted even when match_rule_by.from is
+// empty — by_capability ignores the JSON item entirely, so there's no path
+// to extract.
+func TestValidateSpec_ByCapability_NoFromAccepted(t *testing.T) {
+	yaml := `apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata: { name: foo, version: 1.0.0 }
+spec:
+  requires: { binary: bar }
+  run: { argv: [baz] }
+  signal:
+    shape: list
+    format: json
+    list: Issues
+    match_rule_by:
+      strategy: by_capability
+    fields:
+      file: Pos.Filename
+      line: Pos.Line
+`
+	if _, err := NewFromBytes([]byte(yaml)); err != nil {
+		t.Fatalf("expected by_capability without from to be accepted, got: %v", err)
+	}
+}
+
+// TestValidateSpec_NonByCapability_RequiresFrom confirms that a list-mode
+// capability with any non-by_capability strategy still requires a non-empty
+// match_rule_by.from. This locks in the existing rejection so a future
+// loosening doesn't accidentally let by_id capabilities ship without `from`.
+func TestValidateSpec_NonByCapability_RequiresFrom(t *testing.T) {
+	yaml := `apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata: { name: foo, version: 1.0.0 }
+spec:
+  requires: { binary: bar }
+  run: { argv: [baz] }
+  signal:
+    shape: list
+    format: json
+    list: Issues
+    match_rule_by:
+      strategy: by_id
+    fields:
+      file: Pos.Filename
+`
+	if _, err := NewFromBytes([]byte(yaml)); err == nil {
+		t.Error("expected error for by_id without from, got nil")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/adamgilman/idiomatic/manifest"
+	"github.com/tidwall/gjson"
 )
 
 // TestParseListSignal_Semgrep verifies that canned semgrep JSON output is
@@ -136,5 +137,71 @@ func TestExtractRuleID_TailAfterDot(t *testing.T) {
 		if findings[0].RuleID != tc.want {
 			t.Errorf("input %q: RuleID = %q, want %q", tc.input, findings[0].RuleID, tc.want)
 		}
+	}
+}
+
+func TestTransformRuleID_PrefixBeforeColon(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "revive single-word rule", raw: "exported: should have a comment", want: "exported"},
+		{name: "revive multi-word rule", raw: "package-comments: should have a package comment", want: "package-comments"},
+		{name: "no colon — passthrough", raw: "no rule prefix here", want: "no rule prefix here"},
+		{name: "leading whitespace stripped", raw: " exported : msg", want: "exported"},
+		{name: "empty input — passthrough", raw: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := transformRuleID(tt.raw, "prefix_before_colon")
+			if got != tt.want {
+				t.Errorf("transformRuleID(%q, prefix_before_colon) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuleResolver_ByCapability(t *testing.T) {
+	rules := []manifest.Rule{
+		{ID: "go-check-error-return"},
+	}
+	spec := &MatchRuleBy{Strategy: "by_capability"}
+	r := newRuleResolver(spec, rules)
+
+	// gjson.Result{} is the zero value; by_capability ignores the item.
+	got, ok := r.resolve(gjson.Result{})
+	if !ok {
+		t.Fatal("expected resolver to return ok for non-empty rule list")
+	}
+	if got.ID != "go-check-error-return" {
+		t.Errorf("got rule ID %q, want %q", got.ID, "go-check-error-return")
+	}
+}
+
+func TestRuleResolver_ByCapability_EmptyRules(t *testing.T) {
+	spec := &MatchRuleBy{Strategy: "by_capability"}
+	r := newRuleResolver(spec, nil)
+
+	_, ok := r.resolve(gjson.Result{})
+	if ok {
+		t.Error("expected resolver to return !ok for empty rule list")
+	}
+}
+
+func TestRuleResolver_ByCapability_MultipleRules_FirstWins(t *testing.T) {
+	rules := []manifest.Rule{
+		{ID: "first-rule"},
+		{ID: "second-rule"},
+	}
+	spec := &MatchRuleBy{Strategy: "by_capability"}
+	r := newRuleResolver(spec, rules)
+
+	got, ok := r.resolve(gjson.Result{})
+	if !ok {
+		t.Fatal("expected resolver to return ok")
+	}
+	if got.ID != "first-rule" {
+		t.Errorf("got rule ID %q, want %q (deterministic first-wins)", got.ID, "first-rule")
 	}
 }

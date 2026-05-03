@@ -403,6 +403,53 @@ capabilities:
 
 For private capabilities, push to a private git repo and rely on git auth.
 
+## Wrapping a linter that runs through golangci-lint
+
+When a Go linter is hosted by golangci-lint (revive, errcheck, gocritic,
+nakedret, ...), prefer one capability YAML per linter over a single meta-
+capability that handles all of them. This keeps each capability YAML focused
+on one tool's config and output shape.
+
+Two shapes apply, depending on whether the linter has multiple sub-rules:
+
+**Multi-rule shape** (revive, gocritic) — pack rules pass a `rule:` input to
+identify the sub-rule they want. The capability template emits the linter's
+native config block to enable only those rules. The resolver uses `by_input`
+strategy to extract the rule name from the linter's output text and route
+findings to pack rules. For example, `capabilities/revive.yaml` uses the
+`prefix_before_colon` transform to extract the rule name from revive's
+`"<rule>: <message>"` output format:
+
+```yaml
+signal:
+  shape: list
+  match_rule_by:
+    strategy: by_input
+    field: rule
+    from: Text
+    transform: prefix_before_colon
+```
+
+**Single-rule shape** (errcheck, nakedret, godot, ...) — the linter has only
+one effective check. Pack rules don't pass a `rule:` input. The resolver uses
+`by_capability` strategy: every finding from this linter routes to the first
+pack rule using the capability:
+
+```yaml
+signal:
+  shape: list
+  match_rule_by:
+    strategy: by_capability
+```
+
+Both shapes invoke `golangci-lint -E <linter>` under the hood with
+`--path-mode=abs` to ensure consistent absolute-path output. The capability
+template emits a linter-specific config file in `{tmp}/idio-<linter>.yml`
+that enables only the requested checks.
+
+See `capabilities/revive.yaml` and `capabilities/errcheck.yaml` for working
+examples.
+
 ## Debugging tips
 
 - If the tool runs but produces zero findings, check `signal.list` and `signal.match_rule_by.from` against the actual JSON output. Use `jq` or `python3 -c 'import json,sys; print(json.load(sys.stdin))' < canned.json` to inspect the structure.

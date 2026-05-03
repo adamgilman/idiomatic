@@ -7,11 +7,14 @@
 //     via the NestedList + ParentFields spec. Parent fields are projected onto
 //     inner items so findings can reference the outer object (e.g. filePath).
 //   - Rule resolution uses three strategies: by_id (pack rule ID == extracted
-//     value), by_input (match against a rule's input field), and
-//     linter_contains (primary match + substring disambiguation for tools like
-//     golangci-lint where multiple rules share a linter name).
+//     value), by_input (match against a rule's input field), and by_capability
+//     (every finding maps to the first pack rule using this capability — used by
+//     single-rule per-linter capabilities like errcheck).
 //   - The tail_after_dot transform strips prefixes like "idio-rules.go-no-panic"
 //     down to "go-no-panic" so semgrep check_ids map to pack rule IDs.
+//   - The prefix_before_colon transform extracts the substring before the first
+//     ":" (whitespace-trimmed), used by revive output like
+//     "exported: should have a comment" to yield just "exported".
 package declarative
 
 import (
@@ -178,8 +181,8 @@ type ruleResolver struct {
 
 	// Strategy: by_id — pack rule id == extracted value (with optional transform).
 	// Strategy: by_input — extracted value matches rule.Inputs[Field].
-	// Strategy: linter_contains — first try by_input, then disambiguate by
-	// substring-matching SubruleField against the item's MatchIn.
+	// Strategy: by_capability — every finding maps to the first rule (no item
+	// extraction; used by single-rule per-linter capabilities).
 	indexByID    map[string]manifest.Rule
 	indexByInput map[string][]manifest.Rule
 }
@@ -203,6 +206,15 @@ func (r *ruleResolver) resolve(item gjson.Result) (manifest.Rule, bool) {
 	if r.spec == nil {
 		return manifest.Rule{}, false
 	}
+
+	// Strategies that don't need an extracted value.
+	if r.spec.Strategy == "by_capability" {
+		if len(r.rules) > 0 {
+			return r.rules[0], true
+		}
+		return manifest.Rule{}, false
+	}
+
 	raw := item.Get(r.spec.From).String()
 	if raw == "" {
 		return manifest.Rule{}, false
@@ -219,25 +231,6 @@ func (r *ruleResolver) resolve(item gjson.Result) (manifest.Rule, bool) {
 			return manifest.Rule{}, false
 		}
 		return matches[0], true
-	case "linter_contains":
-		matches := r.indexByInput[val]
-		if len(matches) == 0 {
-			return manifest.Rule{}, false
-		}
-		if len(matches) == 1 || r.spec.MatchIn == "" || r.spec.SubruleField == "" {
-			return matches[0], true
-		}
-		text := strings.ToLower(item.Get(r.spec.MatchIn).String())
-		for _, m := range matches {
-			sub, _ := m.Detector.Config[r.spec.SubruleField].(string)
-			if sub == "" {
-				continue
-			}
-			if strings.Contains(text, strings.ToLower(sub)) {
-				return m, true
-			}
-		}
-		return matches[0], true
 	default:
 		return manifest.Rule{}, false
 	}
@@ -250,6 +243,11 @@ func transformRuleID(raw, transform string) string {
 	case "tail_after_dot":
 		if idx := strings.LastIndex(raw, "."); idx >= 0 {
 			return raw[idx+1:]
+		}
+		return raw
+	case "prefix_before_colon":
+		if idx := strings.IndexByte(raw, ':'); idx >= 0 {
+			return strings.TrimSpace(raw[:idx])
 		}
 		return raw
 	default:

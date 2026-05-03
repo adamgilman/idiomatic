@@ -6,7 +6,23 @@ capabilities:
     path:
       - capabilities/semgrep.yaml
       - capabilities/eslint.yaml
-      - capabilities/golangci-lint.yaml
+      - capabilities/revive.yaml
+      - capabilities/gocritic.yaml
+      - capabilities/errcheck.yaml
+      - capabilities/nakedret.yaml
+      - capabilities/interfacebloat.yaml
+      - capabilities/contextcheck.yaml
+      - capabilities/errorlint.yaml
+      - capabilities/recvcheck.yaml
+      - capabilities/testpackage.yaml
+      - capabilities/godot.yaml
+      - capabilities/nolintlint.yaml
+      - capabilities/tparallel.yaml
+      - capabilities/gocognit.yaml
+      - capabilities/cyclop.yaml
+      - capabilities/nestif.yaml
+      - capabilities/funlen.yaml
+      - capabilities/dupl.yaml
 
 packs:
   - repo: https://github.com/adamgilman/idiomatic

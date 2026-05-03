@@ -158,9 +158,9 @@ signal:
   parent_fields:                   # outer fields projected onto inner items
     file: filePath
   match_rule_by:
-    strategy: by_id | by_input | linter_contains
-    from: check_id                 # gjson path on the inner item
-    transform: tail_after_dot      # optional
+    strategy: by_id | by_input | by_capability
+    from: check_id                 # gjson path on the inner item (omit for by_capability)
+    transform: tail_after_dot      # optional; or prefix_before_colon
     field: rule_id                 # which rule input names the upstream id
   fields:
     file:    parent.file            # parent.<alias> reads from the projected map

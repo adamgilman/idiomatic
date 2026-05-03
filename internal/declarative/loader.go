@@ -177,8 +177,13 @@ func validateSpec(s *CapabilitySpec) error {
 		if body.Signal.Format == "" {
 			body.Signal.Format = "json"
 		}
-		if body.Signal.MatchRuleBy == nil || strings.TrimSpace(body.Signal.MatchRuleBy.From) == "" {
-			return fmt.Errorf("capability %q: spec.signal.match_rule_by.from is required for list signals", name)
+		if body.Signal.MatchRuleBy == nil {
+			return fmt.Errorf("capability %q: spec.signal.match_rule_by is required for list signals", name)
+		}
+		// by_capability ignores the JSON item entirely, so it has no `from` path.
+		if body.Signal.MatchRuleBy.Strategy != "by_capability" &&
+			strings.TrimSpace(body.Signal.MatchRuleBy.From) == "" {
+			return fmt.Errorf("capability %q: spec.signal.match_rule_by.from is required for list signals (unless strategy is by_capability)", name)
 		}
 		if body.Signal.MatchRuleBy.Strategy == "" {
 			body.Signal.MatchRuleBy.Strategy = "by_id"

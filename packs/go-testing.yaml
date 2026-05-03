@@ -399,9 +399,7 @@ rules:
     severity: warning
     tags: [testing, performance]
     detector:
-      capability: golangci-lint
-      config:
-        linter: tparallel
+      capability: tparallel
     applies_to: ["**/*_test.go"]
     excludes: ["**/vendor/**"]
     fix:

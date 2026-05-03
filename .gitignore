@@ -27,6 +27,9 @@ vendor/
 # Claude Code local plugin dev
 .claude-plugin/
 
+# Ephemeral working artifacts from superpowers brainstorming/writing-plans
+docs/superpowers/
+
 # OS
 .DS_Store
 Thumbs.db

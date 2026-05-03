@@ -33,11 +33,15 @@ graph TD
 ### Capabilities
 A capability is a named integration with an external analysis tool. Each is defined as a YAML file in the `capabilities/` directory. The engine contains zero analysis logic — it generates config, invokes the tool, and normalizes output.
 
+**One tool per capability.** Each capability YAML wraps exactly one external analysis tool. golangci-lint hosts many sub-linters (revive, errcheck, gocritic, etc.) — each gets its own capability YAML (`revive.yaml`, `errcheck.yaml`, ...). This keeps capability templates focused on a single tool's config and output shape, eliminates resolver complexity, and makes pack-author intent self-documenting (`capability: revive` reads as the contract). Internally these capabilities all invoke `golangci-lint -E <linter>`, but the runner is an implementation detail.
+
 | Capability | External Tool | Languages |
 |---|---|---|
 | `eslint` | ESLint 9 | TypeScript, React, JSX |
 | `semgrep` | Semgrep | Go (extensible to any language) |
-| `golangci-lint` | golangci-lint | Go |
+| `revive` | golangci-lint (`-E revive`) | Go |
+| `gocritic` | golangci-lint (`-E gocritic`) | Go |
+| `errcheck`, `nakedret`, ... | golangci-lint (`-E <linter>`) | Go |
 | `gosec` | gosec | Go |
 | `gitleaks` | gitleaks | Any |
 | `git` | git | Any |
