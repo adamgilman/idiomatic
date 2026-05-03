@@ -18,15 +18,23 @@ import (
 	"path/filepath"
 )
 
-// CloneRepo shallow-clones a git repo URL into the user's cache directory.
-// Returns the local cache path. Idempotent: if already cached, returns
-// the existing path without re-cloning.
-func CloneRepo(url string) (string, error) {
+// CacheDir returns the absolute path to idiomatic's cache root, where
+// cloned capability/pack repos live under repos/<hash>. Falls back to
+// $TMPDIR when os.UserCacheDir is unavailable. Exposed so the `idio cache`
+// subcommand can manage the same directory CloneRepo writes to.
+func CacheDir() string {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		cacheDir = os.TempDir()
 	}
-	target := filepath.Join(cacheDir, "idiomatic", "repos", urlHash(url))
+	return filepath.Join(cacheDir, "idiomatic")
+}
+
+// CloneRepo shallow-clones a git repo URL into the user's cache directory.
+// Returns the local cache path. Idempotent: if already cached, returns
+// the existing path without re-cloning.
+func CloneRepo(url string) (string, error) {
+	target := filepath.Join(CacheDir(), "repos", urlHash(url))
 
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		return target, nil
