@@ -1,4 +1,4 @@
-.PHONY: build test vet lint install clean integration-test
+.PHONY: build test vet lint install clean integration-test claude-hook-test
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -28,3 +28,9 @@ clean:
 
 integration-test: build
 	bash testing/run-integration-tests.sh
+
+# E2E tests that spawn `claude -p` subprocesses. Costs LLM tokens
+# (~$0.30 worst case for the full suite). Skipped if claude/idio aren't
+# installed — see testing/run-claude-hook-tests.sh.
+claude-hook-test: install
+	bash testing/run-claude-hook-tests.sh
