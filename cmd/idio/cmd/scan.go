@@ -15,6 +15,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -182,10 +183,18 @@ func runClaudeHook(ctx context.Context, cmd *cobra.Command, configPath string, m
 		stdinData = []byte("{}")
 	}
 
-	// Discover config if not provided.
+	// Discover config if not provided. Walk up from the EDITED FILE's directory
+	// (extracted from the hook payload) rather than idio's cwd — the hook is
+	// typically invoked from Claude Code's session cwd which is rarely the
+	// same as the project being edited.
 	cfgPath := configPath
 	if cfgPath == "" {
-		cfgPath = config.Find(meta.WorkingDir)
+		if dir := hookEditDir(stdinData); dir != "" {
+			cfgPath = config.Find(dir)
+		}
+		if cfgPath == "" {
+			cfgPath = config.Find(meta.WorkingDir)
+		}
 	}
 
 	var registry *declarative.Registry
@@ -214,6 +223,29 @@ func runClaudeHook(ctx context.Context, cmd *cobra.Command, configPath string, m
 		_, _ = cmd.OutOrStdout().Write(resp)
 	}
 	return nil
+}
+
+// hookEditDir extracts the parent directory of the file referenced in a
+// PostToolUse hook payload. Returns "" when the payload doesn't contain a
+// usable file_path. Used by claude-hook mode to discover the project's
+// .idiomatic.yaml from the edited file's location, not idio's own cwd.
+func hookEditDir(stdinData []byte) string {
+	var input claudehook.HookInput
+	if err := json.Unmarshal(stdinData, &input); err != nil {
+		return ""
+	}
+	var ti claudehook.EditToolInput
+	if err := json.Unmarshal(input.ToolInput, &ti); err != nil {
+		return ""
+	}
+	if ti.FilePath == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(ti.FilePath)
+	if err != nil {
+		return ""
+	}
+	return filepath.Dir(abs)
 }
 
 func emitErrorAndExit(formatter output.Formatter, rules []manifestlib.Rule, files []string, meta output.InvocationMetadata, errMsg, format string) error {
