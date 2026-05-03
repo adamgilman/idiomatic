@@ -360,14 +360,21 @@ rules:
       capability: semgrep
       config:
         language: go
-        pattern-either:
-          - pattern: rand.Int()
-          - pattern: rand.Intn(...)
-          - pattern: rand.Int63()
-          - pattern: rand.Int63n(...)
-          - pattern: rand.Uint32()
-          - pattern: rand.Float64()
-          - pattern: rand.Read(...)
+        patterns:
+          - pattern-either:
+              - pattern: rand.Int()
+              - pattern: rand.Intn(...)
+              - pattern: rand.Int63()
+              - pattern: rand.Int63n(...)
+              - pattern: rand.Uint32()
+              - pattern: rand.Float64()
+              - pattern: rand.Read(...)
+          # Only flag math/rand. crypto/rand.Read is the recommended fix and
+          # must not be flagged. pattern-not-inside excludes files where
+          # crypto/rand is imported (the common case for legitimate usage).
+          - pattern-not-inside: |
+              import "crypto/rand"
+              ...
     applies_to: ["**/*.go"]
     excludes: ["**/vendor/**", "**/gen/**", "**/*_test.go"]
     fix:

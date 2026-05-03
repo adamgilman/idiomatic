@@ -289,11 +289,12 @@ rules:
       capability: semgrep
       config:
         language: go
-        pattern: |
-          package $PKG
-        metavariable-regex:
-          metavariable: $PKG
-          regex: "^(util|utils|helper|helpers|common|misc|shared|base)$"
+        patterns:
+          - pattern: |
+              package $PKG
+          - metavariable-regex:
+              metavariable: $PKG
+              regex: "^(util|utils|helper|helpers|common|misc|shared|base)$"
     applies_to: ["**/*.go"]
     excludes: ["**/vendor/**", "**/gen/**"]
     fix:
