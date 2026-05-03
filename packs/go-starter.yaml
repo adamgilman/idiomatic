@@ -616,7 +616,10 @@ rules:
 
   - id: go-require-doc-comment
     name: Exported symbols must have doc comments
-    description: Flags exported functions, types, and methods without a godoc comment.
+    description: |
+      Flags exported functions, types, and methods without a godoc comment.
+      Note: revive's `exported` rule only fires in library packages — symbols
+      in `package main` are exempt because they're not consumed externally.
     rationale: |
       Exported symbols are part of the public API. Missing documentation makes
       the package harder to use and prevents godoc from generating useful output.

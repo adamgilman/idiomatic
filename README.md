@@ -22,6 +22,8 @@ brew install adamgilman/tap/idio
 go install github.com/adamgilman/idiomatic/cmd/idio@latest
 ```
 
+> Make sure `$(go env GOPATH)/bin` is on your `PATH` so the resulting `idio` binary is reachable. Most Go users already have this; if `idio` is "command not found", add `export PATH="$PATH:$(go env GOPATH)/bin"` to your shell rc.
+
 **From GitHub Releases:**
 
 Download the latest binary from [Releases](https://github.com/adamgilman/idiomatic/releases).
@@ -63,16 +65,25 @@ capabilities:
   - repo: https://github.com/adamgilman/idiomatic
     path:
       - capabilities/semgrep.yaml
-      - capabilities/eslint.yaml
+      # go-starter requires these per-linter capabilities. If you also use
+      # go-comment-hygiene / go-llm-spaghetti / go-testing, add the linters
+      # those packs reference too — see capabilities/ for the full list.
       - capabilities/revive.yaml
       - capabilities/errcheck.yaml
-      # See capabilities/ for all per-linter wrappers.
+      - capabilities/nakedret.yaml
+      - capabilities/interfacebloat.yaml
+      - capabilities/contextcheck.yaml
+      - capabilities/errorlint.yaml
+      - capabilities/recvcheck.yaml
+      - capabilities/testpackage.yaml
 
 packs:
   - repo: https://github.com/adamgilman/idiomatic
     path:
       - packs/go-starter.yaml
 ```
+
+A pack's rules each name the capability they need (`detector.capability:`). At load time idio errors with `capability "X" is not loaded` if any required capability is missing — list every capability the pack rules reference.
 
 **2. Run a scan:**
 
