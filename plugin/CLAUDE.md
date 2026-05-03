@@ -87,6 +87,15 @@ After generating the config, check that the required external tools are installe
 
 Tell the user which tools are missing and how to install them.
 
+### 4. Hook activation note
+
+Claude Code's settings watcher only watches `.claude/` directories that
+exist when a session starts. If the user adds the hook **mid-session**,
+the hook won't fire until they either run `/hooks` (which reloads the
+config) or restart Claude Code in the project. Tell the user this
+explicitly so they don't conclude the hook is broken when it's just
+not yet loaded.
+
 ## Operations (ongoing use)
 
 ### Hook contract

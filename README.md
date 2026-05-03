@@ -24,6 +24,8 @@ go install github.com/adamgilman/idiomatic/cmd/idio@latest
 
 > Make sure `$(go env GOPATH)/bin` is on your `PATH` so the resulting `idio` binary is reachable. Most Go users already have this; if `idio` is "command not found", add `export PATH="$PATH:$(go env GOPATH)/bin"` to your shell rc.
 
+> If you need a fix that's on `main` but not yet in a release tag, install with `@main` (or a specific commit SHA). Note that `proxy.golang.org` may serve a stale pseudo-version for a few minutes after a merge — `GOPROXY=direct go install ...@main` forces a fresh fetch from GitHub.
+
 **From GitHub Releases:**
 
 Download the latest binary from [Releases](https://github.com/adamgilman/idiomatic/releases).
