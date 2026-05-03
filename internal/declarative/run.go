@@ -116,6 +116,7 @@ func (c *Capability) runBatch(ctx context.Context, req engine.AnalysisRequest) (
 	ictx := invocationCtx{
 		ConfigFile: configPath,
 		Files:      invFiles,
+		Project:    projectRoot(files),
 		Runtime:    rt,
 	}
 
@@ -146,6 +147,7 @@ func (c *Capability) runPerFile(ctx context.Context, req engine.AnalysisRequest)
 	for _, f := range files {
 		ictx := invocationCtx{
 			Files:   []string{f},
+			Project: projectRoot([]string{f}),
 			Runtime: rt,
 		}
 		view := struct {
@@ -227,6 +229,12 @@ func (c *Capability) execOnce(ctx context.Context, bin string, ictx invocationCt
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, bin, argv...)
+	// Run subprocess from the project root so module-aware tools (e.g.
+	// golangci-lint) can resolve packages correctly even when idio's own
+	// cwd is elsewhere — the case that breaks the claude-hook integration.
+	if ictx.Project != "" {
+		cmd.Dir = ictx.Project
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
