@@ -138,7 +138,9 @@ func NewCmdScan() *cobra.Command {
 				if !ok {
 					if _, known := registry.ByName(capName); !known {
 						return emitErrorAndExit(formatter, rules, files, meta,
-							fmt.Sprintf("capability %q is not loaded by any capability source", capName), formatFlag)
+							fmt.Sprintf("capability %q is not loaded by any capability source\n"+
+								"  hint: if your .idiomatic.yaml lists this capability, your local clone may be stale.\n"+
+								"        try: idio cache clear", capName), formatFlag)
 					}
 					return emitErrorAndExit(formatter, rules, files, meta,
 						fmt.Sprintf("capability %q binary is not installed", capName), formatFlag)

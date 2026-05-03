@@ -4,7 +4,7 @@
 //
 //   - SilenceUsage and SilenceErrors are set so the CLI controls its own
 //     error output rather than letting cobra print usage on every error.
-//   - Every subcommand (scan, manifest, version) is registered
+//   - Every subcommand (scan, manifest, version, cache) is registered
 //     here via AddCommand; add new top-level commands in this function.
 package cmd
 
@@ -24,6 +24,7 @@ func NewCmdRoot() *cobra.Command {
 	cmd.AddCommand(NewCmdVersion())
 	cmd.AddCommand(NewCmdManifest())
 	cmd.AddCommand(NewCmdScan())
+	cmd.AddCommand(NewCmdCache())
 
 	return cmd
 }
