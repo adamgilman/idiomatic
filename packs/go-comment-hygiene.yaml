@@ -22,7 +22,9 @@ rules:
     description: >
       Flags exported functions, types, constants, and methods that have
       no doc comment. Go convention requires every exported symbol to
-      have a comment starting with the symbol name.
+      have a comment starting with the symbol name. Note: revive's
+      `exported` rule applies only to library packages — `package main`
+      is exempt, since main-package symbols aren't part of any external API.
     descriptions:
       business: >
         Your Go package is a product that other developers consume. When
