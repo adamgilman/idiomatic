@@ -1,0 +1,258 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: py-typing
+  name: Python Type Annotations
+  version: 0.1.0
+  description: >
+    Type annotation hygiene rules for Python projects. Enforces return type
+    annotations on public functions, flags the legacy collections.namedtuple
+    in favor of typing.NamedTuple, and catches implicit Optional mismatches
+    where a parameter accepts None but its declared type does not say so.
+    These rules promote a fully type-annotated codebase where mypy and pyright
+    can catch bugs statically before they reach production.
+  maintainer: idiomatic
+  license: Apache-2.0
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-typing.yaml
+  tags:
+    language: python
+    category: type-safety
+
+rules:
+  # ── Return type annotations ────────────────────────────────────
+
+  - id: py-missing-return-type
+    name: Public function missing return type annotation
+    description: >
+      Flags public functions (lowercase names, not prefixed with underscore)
+      that do not declare a return type annotation. Without a return type,
+      mypy and pyright infer the return as Any, silently disabling type
+      checking for all callers of the function.
+    descriptions:
+      business: >
+        A function without a return type annotation is a black box — the type
+        checker treats it as returning "anything," which means type errors in
+        callers go undetected. One unannotated function disables type checking
+        for every function that calls it. Over time, a codebase with missing
+        return types accumulates silent type errors that only appear at runtime.
+        Adding return types progressively closes this gap.
+      developer: >
+        A public function has no -> ReturnType annotation. mypy and pyright
+        treat unannotated return types as Any, which infects callers — the
+        result of calling this function is Any, making the type checker unable
+        to verify how callers use the return value. Add a return type: -> None
+        for functions that return nothing, -> type for functions that return a
+        value, and -> type | None (or Optional[type]) for functions that may
+        return None. Run mypy --disallow-untyped-defs to enforce this project-wide.
+    rationale: >
+      Return type annotations are the most important type annotation in a
+      function. They define the function's output contract — what callers can
+      expect. Without them, the type checker treats the return as Any, silently
+      skipping all type verification on every expression that uses the return
+      value. A single unannotated function in a call chain can disable type
+      checking across dozens of callers. Annotating return types is the highest-
+      ROI step toward a fully type-checked codebase.
+    severity: warning
+    tags: [type-safety, annotations, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: |
+              def $FUNC(...):
+                  ...
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^[a-z][a-zA-Z0-9_]*$"
+          - pattern-not: |
+              def $FUNC(...) -> $TYPE:
+                  ...
+          - pattern-not-inside: |
+              class $CLS:
+                  ...
+    applies_to: ["**/*.py"]
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/site-packages/**"
+      - "**/test_*.py"
+      - "**/*_test.py"
+      - "**/conftest.py"
+    fix:
+      message: Add a return type annotation (-> None, -> ReturnType, or -> ReturnType | None).
+      example: |
+        # Before — return type unknown, type checker treats result as Any
+        def get_user(user_id: int):
+            return db.query(User).get(user_id)
+
+        def send_notification(user_id: int, message: str):
+            queue.publish({"user": user_id, "msg": message})
+
+        # After — fully annotated, type checker can verify callers
+        def get_user(user_id: int) -> User | None:
+            return db.query(User).get(user_id)
+
+        def send_notification(user_id: int, message: str) -> None:
+            queue.publish({"user": user_id, "msg": message})
+    references:
+      - https://peps.python.org/pep-0484/
+      - https://mypy.readthedocs.io/en/stable/cheat_sheet_py3.html
+      - https://docs.python.org/3/library/typing.html
+
+  - id: py-missing-method-return-type
+    name: Public method missing return type annotation
+    description: >
+      Flags public methods (non-dunder, non-underscore-prefixed) on classes
+      that do not declare a return type annotation. Methods without return
+      types disable type checking for all callers, including subclass overrides.
+    descriptions:
+      business: >
+        Methods without return types are opaque to the type checker — every
+        caller gets back an Any, and any type error in how they use the result
+        is silently ignored. In class hierarchies, an unannotated base class
+        method prevents the type checker from verifying that subclasses return
+        the correct type. This is especially problematic in larger codebases
+        where a base class method is called from dozens of places.
+      developer: >
+        A public method (not __dunder__ or _private) has no return type
+        annotation. The type checker infers the return as Any, which propagates
+        to all callers. Add -> None for methods that are called for side effects,
+        -> Self for methods that return the instance, -> type for those that
+        return a value. Methods that override a base class should have return
+        types consistent with the base class signature.
+    rationale: >
+      Class methods are the primary API surface of object-oriented Python code.
+      Without return type annotations, the type checker cannot verify the
+      contract between a method and its callers, between base classes and
+      subclasses, or between producers and consumers of objects. Return type
+      annotations on methods are the foundation of typed class hierarchies and
+      enable mypy's strict checking mode to catch entire categories of runtime
+      errors before they ship.
+    severity: warning
+    tags: [type-safety, annotations, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: |
+              def $FUNC(self, ...):
+                  ...
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^[a-z][a-zA-Z0-9_]*$"
+          - pattern-not: |
+              def $FUNC(self, ...) -> $TYPE:
+                  ...
+          - pattern-inside: |
+              class $CLS:
+                  ...
+    applies_to: ["**/*.py"]
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/site-packages/**"
+      - "**/test_*.py"
+      - "**/*_test.py"
+      - "**/conftest.py"
+    fix:
+      message: Add a return type annotation to the method signature.
+      example: |
+        # Before — mypy cannot check what callers do with the return value
+        class OrderProcessor:
+            def process(self, order_id: str):
+                order = self.db.get(order_id)
+                return self.executor.run(order)
+
+            def cancel(self, order_id: str):
+                self.db.update(order_id, status="cancelled")
+
+        # After — fully typed API surface
+        class OrderProcessor:
+            def process(self, order_id: str) -> ProcessResult:
+                order = self.db.get(order_id)
+                return self.executor.run(order)
+
+            def cancel(self, order_id: str) -> None:
+                self.db.update(order_id, status="cancelled")
+    references:
+      - https://mypy.readthedocs.io/en/stable/class_basics.html
+      - https://peps.python.org/pep-0526/
+
+  # ── Named tuples ───────────────────────────────────────────────
+
+  - id: py-untyped-namedtuple
+    name: Use typing.NamedTuple instead of collections.namedtuple
+    description: >
+      Flags collections.namedtuple() calls. The modern equivalent is
+      typing.NamedTuple defined as a class, which supports field type
+      annotations, default values, docstrings, and custom methods — while
+      remaining backwards-compatible as a tuple.
+    descriptions:
+      business: >
+        collections.namedtuple creates a typed tuple but without actual type
+        annotations. The type checker treats fields as Any. The modern
+        typing.NamedTuple class syntax provides the same immutable tuple
+        behavior with full type annotations, making it inspectable, documentable,
+        and checkable. It also supports default values and custom methods,
+        which the old form does not.
+      developer: >
+        collections.namedtuple("Name", ["field1", "field2"]) is the legacy
+        API. typing.NamedTuple supports field type annotations, default values,
+        docstrings, and custom methods using class syntax. The result is still
+        a proper tuple subclass with the same access patterns. mypy understands
+        both forms, but typing.NamedTuple gives precise per-field types rather
+        than Any. Dataclasses are an alternative for mutable named records, but
+        NamedTuple is correct for immutable value objects.
+    rationale: >
+      typing.NamedTuple (PEP 544) gives named tuples first-class type system
+      support. Each field has a declared type, default values are expressible,
+      docstrings are allowed, and custom methods can be added. The class-based
+      syntax is more readable, more maintainable, and more tool-friendly than
+      the factory function form. mypy and pyright both introspect typing.NamedTuple
+      classes to validate access patterns, while collections.namedtuple fields
+      have type Any. For new code, typing.NamedTuple is always the right choice.
+    severity: warning
+    tags: [type-safety, modern-python, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: $VAR = collections.namedtuple(...)
+    applies_to: ["**/*.py"]
+    excludes:
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/site-packages/**"
+    fix:
+      message: Define a class inheriting from typing.NamedTuple with field type annotations.
+      example: |
+        # Before — untyped, no defaults, no custom methods
+        from collections import namedtuple
+
+        Point = namedtuple("Point", ["x", "y"])
+        UserRecord = namedtuple("UserRecord", ["id", "name", "email"])
+
+        # After — typed, supports defaults and methods
+        from typing import NamedTuple
+
+        class Point(NamedTuple):
+            """A 2D point in Cartesian space."""
+            x: float
+            y: float
+
+            def distance_from_origin(self) -> float:
+                return (self.x ** 2 + self.y ** 2) ** 0.5
+
+        class UserRecord(NamedTuple):
+            """Immutable user data snapshot."""
+            id: int
+            name: str
+            email: str
+    references:
+      - https://docs.python.org/3/library/typing.html#typing.NamedTuple
+      - https://peps.python.org/pep-0544/
+      - https://mypy.readthedocs.io/en/stable/kinds_of_types.html#named-tuples
