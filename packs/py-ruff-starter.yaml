@@ -1,0 +1,567 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: py-ruff-starter
+  name: Python Ruff Starter
+  version: 0.1.0
+  description: >
+    Essential Python rules powered by Ruff — covering unused imports, unused
+    variables, import ordering, None/bool comparisons, loop variable hygiene,
+    function-call default arguments, class naming, and modern type annotation
+    syntax. Complements python-starter (semgrep) with rules that require
+    flow-aware or structural analysis that semgrep patterns cannot express.
+  maintainer: idiomatic
+  license: Apache-2.0
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-ruff-starter.yaml
+  tags:
+    language: python
+    requires: "python>=3.11"
+
+rules:
+  # ── Unused code ────────────────────────────────────────────────
+
+  - id: py-unused-import
+    name: Unused import
+    description: >
+      Flags import statements whose names are never referenced in the module.
+      Unused imports are dead code that increases load time and confuses
+      readers who expect every import to be purposeful.
+    descriptions:
+      business: >
+        Every unused import is a lie — it tells developers "this dependency
+        is needed" when it isn't. Over time, unused imports accumulate into
+        a fog that makes it hard to know what a module actually uses. They
+        also slow down startup and can pull in transitive dependencies that
+        introduce security vulnerabilities.
+      developer: >
+        A name was imported but never referenced in this module. Remove it.
+        If the import is a side-effect import (e.g. registering a plugin),
+        annotate it with # noqa: F401 to make the intent explicit. Use
+        `__all__` to re-export names imported for consumers.
+    rationale: >
+      Unused imports are unambiguously dead code. Ruff (pyflakes F401) has
+      precise import-reference tracking that semgrep pattern matching cannot
+      replicate — it understands aliased imports, star imports, and __all__
+      re-exports. Removing unused imports reduces cognitive load, eliminates
+      dead dependency declarations, and keeps module interfaces honest.
+    severity: warning
+    tags: [imports, dead-code, python]
+    detector:
+      capability: ruff
+      config:
+        rule: F401
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Remove the unused import, or annotate with # noqa: F401 if it is a side-effect import.
+      example: |
+        # Before — json imported but never used
+        import os
+        import json
+        from pathlib import Path
+
+        def get_home():
+            return Path(os.environ["HOME"])
+
+        # After — only used imports remain
+        import os
+        from pathlib import Path
+
+        def get_home():
+            return Path(os.environ["HOME"])
+    references:
+      - https://docs.astral.sh/ruff/rules/unused-import/
+      - https://docs.python.org/3/reference/simple_stmts.html#the-import-statement
+
+  - id: py-unused-variable
+    name: Local variable assigned but never used
+    description: >
+      Flags local variable assignments whose value is never read. The assigned
+      value is computed and discarded, wasting CPU and signalling a bug or
+      incomplete implementation.
+    descriptions:
+      business: >
+        Work was done and thrown away. If a variable is never read, either
+        the computation is wasted CPU cycles, or the developer forgot to use
+        the result — meaning the feature is silently broken. Either way, the
+        code is not doing what it looks like it should be doing.
+      developer: >
+        A local variable is assigned but its value is never subsequently
+        read. If the assignment is intentional (e.g. an error is caught for
+        its side effects), rename the variable to _ or use `_varname` to
+        signal intent. Otherwise, remove the assignment or use the value.
+    rationale: >
+      Unused variables are a reliable signal of one of two problems: dead
+      code (the developer computed something and forgot to remove the
+      assignment) or an incomplete implementation (the developer forgot to
+      use the result). Ruff tracks data flow within function scope to detect
+      this — semgrep patterns cannot. Using _ as the variable name is the
+      Python convention for "intentionally unused."
+    severity: warning
+    tags: [dead-code, correctness, python]
+    detector:
+      capability: ruff
+      config:
+        rule: F841
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Remove the unused assignment or rename to _ to signal intent.
+      example: |
+        # Before — result computed but never used
+        def process(items):
+            total = sum(items)   # total is never read
+            return [x * 2 for x in items]
+
+        # After — remove the dead assignment
+        def process(items):
+            return [x * 2 for x in items]
+    references:
+      - https://docs.astral.sh/ruff/rules/local-variable-is-assigned-to-but-never-used/
+
+  # ── Correctness ────────────────────────────────────────────────
+
+  - id: py-none-comparison-equality
+    name: Use "is None" not "== None"
+    description: >
+      Flags comparisons using == or != against None. The correct Python
+      idiom is "is None" or "is not None" because None is a singleton and
+      identity comparison is both correct and faster.
+    descriptions:
+      business: >
+        This code may behave incorrectly for objects that override __eq__.
+        A class that returns True for == None comparisons (unusual but
+        legal Python) would silently break logic that should only trigger
+        for the actual None value. Using "is None" is guaranteed correct
+        and is the explicit Python convention.
+      developer: >
+        Comparison to None with == or != calls __eq__ on the left operand.
+        Most objects inherit the default __eq__ which compares by identity,
+        but objects can override __eq__ to return True for None comparisons
+        (e.g. numpy arrays return element-wise results). The correct idiom
+        is "is None" or "is not None" — identity check against the singleton.
+        PEP 8 explicitly requires this.
+    rationale: >
+      None is a singleton — there is exactly one None object in any Python
+      process. Identity comparison (is/is not) is semantically correct and
+      communicates intent clearly. Equality comparison (==/!=) calls __eq__,
+      which can be overridden and can behave unexpectedly (numpy arrays,
+      SQLAlchemy columns). PEP 8 explicitly mandates "is None" over "== None".
+    severity: warning
+    tags: [correctness, style, python]
+    detector:
+      capability: ruff
+      config:
+        rule: E711
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use "is None" or "is not None" instead of == None or != None.
+      example: |
+        # Before — calls __eq__, potentially incorrect
+        if user == None:
+            return default
+        if result != None:
+            process(result)
+
+        # After — identity comparison, always correct
+        if user is None:
+            return default
+        if result is not None:
+            process(result)
+    references:
+      - https://docs.astral.sh/ruff/rules/none-comparison/
+      - https://peps.python.org/pep-0008/#programming-recommendations
+
+  - id: py-bool-comparison-equality
+    name: Use "is True" / "is False" not "== True" / "== False"
+    description: >
+      Flags comparisons using == or != against True or False literals.
+      The correct idiom is identity comparison or direct truthiness testing,
+      not equality against a bool literal.
+    descriptions:
+      business: >
+        This code may behave incorrectly for objects that override __eq__
+        or for truthy non-True values. A condition like "x == True" is False
+        for the integer 1 in some contexts, while "x is True" is False for
+        anything that is not the exact True singleton. The best fix is usually
+        to test truthiness directly: "if x:" or "if not x:".
+      developer: >
+        Comparing with == True or == False is almost always wrong. It fails
+        for truthy values that are not exactly True (e.g. 1 == True is True
+        but 2 == True is False). Use "if x:" to test truthiness, "if x is True:"
+        if you specifically need the exact True singleton, or "if not x:" for
+        falsiness. Equality comparison to booleans is a PEP 8 violation.
+    rationale: >
+      Comparing with == True means "equal to the boolean True" which is
+      different from "truthy." The integer 1 equals True, but the integer 2
+      does not. This creates subtle bugs when functions return non-boolean
+      truthy values. The Python convention is to test truthiness directly
+      with if/not, or use "is True" only when the exact singleton matters.
+      PEP 8 explicitly prohibits "== True" comparisons.
+    severity: warning
+    tags: [correctness, style, python]
+    detector:
+      capability: ruff
+      config:
+        rule: E712
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Test truthiness directly with "if x:" or "if not x:", or use "is True" for singleton identity.
+      example: |
+        # Before — incorrect for truthy non-True values
+        if is_valid == True:
+            process()
+        if flag == False:
+            skip()
+
+        # After — idiomatic truthiness testing
+        if is_valid:
+            process()
+        if not flag:
+            skip()
+    references:
+      - https://docs.astral.sh/ruff/rules/true-false-comparison/
+      - https://peps.python.org/pep-0008/#programming-recommendations
+
+  # ── Import hygiene ─────────────────────────────────────────────
+
+  - id: py-imports-unsorted
+    name: Import block is not sorted
+    description: >
+      Flags import blocks that are not in the canonical isort order: stdlib
+      first, then third-party, then local — each group sorted alphabetically
+      and separated by a blank line.
+    descriptions:
+      business: >
+        Unsorted imports are noise that slows down code review and merge
+        conflict resolution. When every developer on a team imports things
+        in their own order, merging two branches that both touch the import
+        block creates unnecessary conflicts. Consistent import ordering is
+        a baseline hygiene standard that pays off throughout the project's
+        life.
+      developer: >
+        Import blocks should follow isort conventions: standard library imports
+        first, then third-party, then local, with each group separated by a
+        blank line and sorted alphabetically within each group. Ruff enforces
+        this automatically and can auto-fix. Running "ruff check --fix" or
+        enabling editor integration removes this as a manual concern.
+    rationale: >
+      Import ordering is a universal Python convention enforced by isort
+      and now Ruff. Consistent ordering enables at-a-glance identification
+      of dependencies, reduces merge conflicts (rebase conflicts in import
+      blocks are almost always caused by inconsistent ordering), and is a
+      signal of overall code quality discipline. This is mechanical work that
+      should never require human attention — let the linter handle it.
+    severity: warning
+    tags: [imports, style, python]
+    detector:
+      capability: ruff
+      config:
+        rule: I001
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Run "ruff check --fix" to auto-sort imports, or configure your editor to sort on save.
+      example: |
+        # Before — mixed order, no section separation
+        import json
+        from myapp.models import User
+        import os
+        import requests
+        from pathlib import Path
+
+        # After — stdlib, then third-party, then local; each group sorted
+        import json
+        import os
+        from pathlib import Path
+
+        import requests
+
+        from myapp.models import User
+    references:
+      - https://docs.astral.sh/ruff/rules/unsorted-imports/
+      - https://peps.python.org/pep-0008/#imports
+
+  # ── Loop hygiene ───────────────────────────────────────────────
+
+  - id: py-loop-control-var-unused
+    name: Loop control variable not used in loop body
+    description: >
+      Flags for-loop control variables that are never referenced inside the
+      loop body. The conventional Python idiom for an intentionally unused
+      loop variable is a single underscore _.
+    descriptions:
+      business: >
+        When a loop variable has a real name but is never used, it creates
+        confusion — readers wonder what the variable represents and why it
+        is not being used. It may also indicate a bug where the developer
+        intended to use the variable but forgot. The underscore convention
+        makes intent explicit: "I am iterating N times and the value does
+        not matter."
+      developer: >
+        The loop variable $VAR is never referenced inside the loop body.
+        If the loop body does not need the value, use _ as the variable
+        name (conventional "don't care") or _varname if you need to keep
+        the name readable. This is a style issue but also a potential bug
+        indicator — check whether the variable was meant to be used.
+    rationale: >
+      Using a named loop variable that is never read suggests either dead
+      code (the body was simplified and the variable is leftover) or a bug
+      (the developer intended to use it). Python's convention is to use _
+      for intentionally unused variables — this is self-documenting and
+      prevents linters and readers from wondering whether the variable was
+      forgotten. Ruff B007 catches this with data-flow awareness that
+      semgrep patterns cannot replicate.
+    severity: warning
+    tags: [style, dead-code, python]
+    detector:
+      capability: ruff
+      config:
+        rule: B007
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Rename the unused loop variable to _ or _varname to signal it is intentionally unused.
+      example: |
+        # Before — 'item' declared but never used
+        for item in range(10):
+            process_next()
+
+        # After — underscore signals intentional non-use
+        for _ in range(10):
+            process_next()
+    references:
+      - https://docs.astral.sh/ruff/rules/unused-loop-control-variable/
+
+  # ── Default argument hygiene ───────────────────────────────────
+
+  - id: py-function-call-in-default-arg
+    name: Function call in default argument
+    description: >
+      Flags default argument values that are function calls (other than
+      a small set of known-safe calls). Default arguments are evaluated
+      once at function definition time, so mutable or stateful call results
+      are shared across all invocations.
+    descriptions:
+      business: >
+        A function call in a default argument position runs once when the
+        module is loaded, not when the function is called. This means the
+        default value is frozen at startup. For stateful calls like
+        datetime.now() or uuid.uuid4(), the default is always the same
+        startup-time value — every call with an omitted argument gets the
+        identical timestamp or UUID from when the module was first imported.
+      developer: >
+        datetime.now(), uuid.uuid4(), and similar calls in default argument
+        position execute once when Python compiles the function definition.
+        The resulting object is reused for every call that omits that argument.
+        Use None as the default and compute the value inside the function
+        body, where it evaluates freshly on each call.
+    rationale: >
+      Function calls in default argument position are evaluated at definition
+      time (when the module is loaded), not at call time. For pure value
+      factories this is usually harmless, but for any call with side effects
+      or state (datetime.now(), uuid.uuid4(), get_db_connection()) it
+      produces surprising behavior: all callers share the same pre-computed
+      object. This is B006's sibling (mutable literals) extended to function
+      calls. Use None as the sentinel and compute the value inside the body.
+    severity: warning
+    tags: [correctness, gotcha, python]
+    detector:
+      capability: ruff
+      config:
+        rule: B008
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Use None as the default and compute the value inside the function body.
+      example: |
+        # Before — datetime.now() runs once at module load time
+        def log_event(event, timestamp=datetime.now()):
+            write(timestamp, event)
+
+        # After — timestamp is fresh on every call
+        def log_event(event, timestamp=None):
+            if timestamp is None:
+                timestamp = datetime.now()
+            write(timestamp, event)
+    references:
+      - https://docs.astral.sh/ruff/rules/function-call-in-default-argument/
+
+  # ── Naming conventions ─────────────────────────────────────────
+
+  - id: py-class-name-not-capwords
+    name: Class name should use CapWords convention
+    description: >
+      Flags class definitions whose name does not follow the CapWords
+      (PascalCase) convention required by PEP 8. Lowercase or UPPER_CASE
+      class names break the convention Python's entire standard library
+      and every major framework uses.
+    descriptions:
+      business: >
+        Inconsistent class naming makes code harder to read. Python programmers
+        rely on CapWords as an instant visual signal that something is a class,
+        not a function or variable. When class names don't follow this convention,
+        developers must check whether a name refers to a class or a factory
+        function every time they read it, adding cognitive overhead throughout
+        the codebase's lifetime.
+      developer: >
+        PEP 8 specifies that class names use the CapWords convention (also
+        called PascalCase or CamelCase): each word starts with a capital
+        letter, no underscores, no ALL_CAPS. Exceptions are types intended
+        to look like builtins (e.g. collections.OrderedDict) but those are
+        rare. Rename the class to follow the convention.
+    rationale: >
+      CapWords for class names is one of Python's most fundamental conventions.
+      It is enforced by PEP 8, followed by the entire standard library, and
+      expected by every Python linter, IDE, and documentation generator.
+      Deviating from it creates friction for every developer who reads the
+      code and breaks tooling assumptions (e.g. Sphinx autoclasses, IDE
+      class-name completion). This is mechanical to fix and should not
+      require discussion.
+    severity: warning
+    tags: [naming, style, pep8, python]
+    detector:
+      capability: ruff
+      config:
+        rule: N801
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Rename the class using CapWords (PascalCase) — each word capitalized, no underscores.
+      example: |
+        # Before — lowercase and underscore class name
+        class user_profile:
+            pass
+
+        class HTTP_client:
+            pass
+
+        # After — CapWords convention
+        class UserProfile:
+            pass
+
+        class HttpClient:
+            pass
+    references:
+      - https://docs.astral.sh/ruff/rules/invalid-class-name/
+      - https://peps.python.org/pep-0008/#class-names
+
+  # ── Modern type syntax (Python 3.9+/3.10+) ────────────────────
+
+  - id: py-old-style-builtin-type
+    name: Use built-in generic type instead of typing module alias
+    description: >
+      Flags use of typing.List, typing.Dict, typing.Tuple, typing.Set, and
+      typing.FrozenSet as type annotations. Python 3.9+ supports using the
+      built-in types (list, dict, tuple, set) directly as generics.
+    descriptions:
+      business: >
+        Using the typing module's capitalized aliases is legacy syntax from
+        Python 3.5-3.8. Every major project has migrated to built-in generics.
+        New code using the old syntax signals to contributors that the team is
+        working with outdated practices, and creates unnecessary typing imports
+        that clutter the file header.
+      developer: >
+        Since Python 3.9, built-in types are directly subscriptable: list[str],
+        dict[str, int], tuple[str, ...], set[int]. The typing.List, typing.Dict,
+        etc. aliases are deprecated and will eventually be removed. Migrate to
+        the built-in form. If you need compatibility with Python <3.9, add
+        "from __future__ import annotations" which defers evaluation and makes
+        built-in generics work at runtime on older versions.
+    rationale: >
+      PEP 585 (Python 3.9) made all built-in collection types directly
+      subscriptable as generics. The typing module aliases (List, Dict, etc.)
+      are officially deprecated since 3.9 and scheduled for removal. New code
+      should always use list[str] instead of List[str] — it's shorter, has
+      no import, and is the only form that will exist in the future. Ruff
+      UP006 detects this with import-awareness that semgrep cannot replicate.
+    severity: warning
+    tags: [type-safety, modern-python, python]
+    detector:
+      capability: ruff
+      config:
+        rule: UP006
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Replace typing.List with list, typing.Dict with dict, typing.Tuple with tuple, etc.
+      example: |
+        # Before — deprecated typing aliases
+        from typing import Dict, List, Optional, Tuple
+
+        def get_users() -> List[Dict[str, str]]:
+            ...
+
+        def parse(data: Tuple[str, ...]) -> Optional[List[int]]:
+            ...
+
+        # After — built-in generics (Python 3.9+)
+        def get_users() -> list[dict[str, str]]:
+            ...
+
+        def parse(data: tuple[str, ...]) -> list[int] | None:
+            ...
+    references:
+      - https://docs.astral.sh/ruff/rules/non-pep585-annotation/
+      - https://peps.python.org/pep-0585/
+
+  - id: py-old-style-union-type
+    name: Use X | Y union syntax instead of Union[X, Y]
+    description: >
+      Flags use of typing.Union[X, Y] in type annotations. Python 3.10+
+      supports the | operator for union types, which is shorter and reads
+      more naturally.
+    descriptions:
+      business: >
+        Union[X, Y] is legacy syntax from before Python 3.10. The new syntax
+        (X | Y) is cleaner, requires no import, and is what Python's own
+        documentation now uses. New code using Union[] signals outdated
+        practices and requires an extra import statement that the | form
+        eliminates entirely.
+      developer: >
+        Since Python 3.10, the | operator creates union types natively in
+        annotations: str | None instead of Optional[str], int | str instead
+        of Union[int, str]. This eliminates the need to import Union and
+        Optional from typing. If you need compatibility with Python <3.10,
+        add "from __future__ import annotations" to defer annotation
+        evaluation — the | syntax then works at runtime on older versions.
+    rationale: >
+      PEP 604 (Python 3.10) added | as the union type operator for
+      annotations. typing.Union is now deprecated and scheduled for removal.
+      The | syntax is shorter, requires no import, and reads left-to-right
+      like a natural "or." typing.Optional[X] is exactly X | None and should
+      be migrated accordingly. Ruff UP007 detects this with import tracking
+      that semgrep cannot express.
+    severity: warning
+    tags: [type-safety, modern-python, python]
+    detector:
+      capability: ruff
+      config:
+        rule: UP007
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Replace Union[X, Y] with X | Y and Optional[X] with X | None.
+      example: |
+        # Before — deprecated Union and Optional
+        from typing import Optional, Union
+
+        def find_user(user_id: Union[int, str]) -> Optional[User]:
+            ...
+
+        def parse_value(raw: Union[str, int, None]) -> int:
+            ...
+
+        # After — clean union syntax (Python 3.10+)
+        def find_user(user_id: int | str) -> User | None:
+            ...
+
+        def parse_value(raw: str | int | None) -> int:
+            ...
+    references:
+      - https://docs.astral.sh/ruff/rules/non-pep604-annotation/
+      - https://peps.python.org/pep-0604/

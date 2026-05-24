@@ -1,0 +1,71 @@
+# yaml-language-server: $schema=../schemas/capability.schema.json
+apiVersion: capabilities.idiomatic.dev/v1alpha1
+kind: Capability
+metadata:
+  name: ruff
+  version: 1.0.0
+  description: >
+    Fast Python linter (Ruff) — consolidates pyflakes, pycodestyle, isort,
+    flake8-bugbear, pep8-naming, pyupgrade, and 600+ rules into one binary.
+    Each pack rule specifies a single Ruff rule code; the capability batches
+    all codes into one invocation and routes findings back by code.
+
+spec:
+  applies_to_files:
+    extensions: [".py"]
+
+  requires:
+    binary: ruff
+    install: "uv tool install ruff"
+
+  inputs:
+    rule:
+      type: string
+      required: true
+      description: >
+        Ruff rule code (e.g. F401, E711, I001, B007, N801, UP007).
+        See https://docs.astral.sh/ruff/rules/ for the full list.
+
+  run:
+    per: batch
+    config_file:
+      path: "{tmp}/idio-ruff.toml"
+      # Generate a minimal ruff.toml that selects exactly the rules from the
+      # active pack rules. target-version py311 enables all pyupgrade (UP*)
+      # rules — appropriate for new Python projects.
+      template: |
+        target-version = "py311"
+
+        [lint]
+        select = [{{ range $i, $r := .Rules }}{{ if $i }}, {{ end }}"{{ index $r.Inputs "rule" }}"{{ end }}]
+    argv:
+      - check
+      - --config
+      - "{config_file}"
+      - --output-format
+      - json
+      - --no-cache
+      - "{files}"
+    timeout: 30s
+    ok_exit: [1]
+    output: stdout
+
+  signal:
+    shape: list
+    source: stdout
+    format: json
+    # Ruff outputs a top-level JSON array of findings.
+    # Each finding has: code, message, filename, location.row, location.column,
+    # end_location.row, end_location.column.
+    list: ""
+    match_rule_by:
+      strategy: by_input
+      field: rule
+      from: code
+    fields:
+      file:     filename
+      line:     location.row
+      col:      location.column
+      end_line: end_location.row
+      end_col:  end_location.column
+      message:  message

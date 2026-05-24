@@ -1,0 +1,288 @@
+# yaml-language-server: $schema=../schemas/rule-pack.schema.json
+apiVersion: rules.idiomatic.dev/v1alpha1
+kind: RulePack
+
+pack:
+  id: py-async
+  name: Python Async/Asyncio
+  version: 0.1.0
+  description: >
+    Asyncio anti-pattern rules for Python projects using async/await. Catches
+    fire-and-forget task leaks, blocking calls inside coroutines, and
+    asyncio.gather() without exception isolation. These rules apply to all
+    async code, not just FastAPI endpoints — they complement py-fastapi which
+    targets framework-specific patterns.
+  maintainer: idiomatic
+  license: Apache-2.0
+  homepage: https://github.com/adamgilman/idiomatic/blob/main/packs/py-async.yaml
+  tags:
+    language: python
+    category: async
+    framework: asyncio
+
+rules:
+  # ── Blocking calls in coroutines ───────────────────────────────
+
+  - id: py-async-blocking-sleep
+    name: time.sleep() blocks the event loop inside async function
+    description: >
+      Flags time.sleep() calls inside async def functions. time.sleep()
+      blocks the OS thread, preventing all other coroutines from running
+      during the sleep — effectively pausing the entire event loop.
+    descriptions:
+      business: >
+        Calling time.sleep() inside an async function freezes your entire
+        application — not just the current task, but every request, every
+        background job, every other async operation — for the full duration
+        of the sleep. Under load, a single misplaced time.sleep(1) can cause
+        cascading timeouts across every concurrent user. The asyncio equivalent
+        (asyncio.sleep) pauses only the current coroutine while letting
+        everything else run.
+      developer: >
+        time.sleep() calls time.sleep() in the OS, which blocks the current
+        thread. asyncio runs all coroutines on a single thread — blocking it
+        prevents the event loop from scheduling any other coroutine during the
+        sleep. Replace with await asyncio.sleep() which suspends the current
+        coroutine and yields control to the event loop, allowing other
+        coroutines to advance. For tests, mock asyncio.sleep not time.sleep.
+    rationale: >
+      asyncio's concurrency model depends on coroutines yielding control via
+      await. A blocking call like time.sleep() holds the thread for its full
+      duration — the event loop cannot switch to another coroutine until the
+      blocking call returns. Under real load, a 0.1s time.sleep() in a
+      request handler causes every concurrent request to wait 0.1s longer,
+      creating latency cascades. await asyncio.sleep() yields immediately,
+      letting other work proceed.
+    severity: error
+    tags: [async, event-loop, performance, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: time.sleep(...)
+          - pattern-inside: |
+              async def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+    fix:
+      message: Replace time.sleep(n) with await asyncio.sleep(n) inside async functions.
+      example: |
+        # Before — blocks the entire event loop
+        async def poll_until_ready(job_id: str) -> Result:
+            while True:
+                status = await get_status(job_id)
+                if status.done:
+                    return status.result
+                time.sleep(2)  # blocks all other coroutines for 2 seconds
+
+        # After — suspends only this coroutine, others keep running
+        async def poll_until_ready(job_id: str) -> Result:
+            while True:
+                status = await get_status(job_id)
+                if status.done:
+                    return status.result
+                await asyncio.sleep(2)
+    references:
+      - https://docs.python.org/3/library/asyncio-task.html#sleeping
+      - https://docs.python.org/3/library/asyncio-dev.html#running-blocking-code
+
+  - id: py-async-blocking-http
+    name: requests library used inside async function
+    description: >
+      Flags requests.get(), requests.post(), requests.put(), requests.delete(),
+      and requests.request() calls inside async def functions. The requests
+      library is synchronous and blocks the event loop thread for the full
+      duration of the HTTP call.
+    descriptions:
+      business: >
+        The requests library makes HTTP calls that block the entire event loop
+        until the remote server responds. Under load, a 200ms external API call
+        with requests inside an async handler means every other concurrent user
+        waits an extra 200ms. With 50 concurrent requests, each one serializes
+        behind the others — your "async" service degrades to synchronous
+        throughput. Use httpx.AsyncClient or aiohttp for non-blocking HTTP.
+      developer: >
+        requests.get() uses the urllib3 socket API which calls recv() on the OS
+        socket, blocking the thread. asyncio cannot interrupt a blocking system
+        call. Replace with httpx.AsyncClient (drop-in requests replacement with
+        async support) or aiohttp.ClientSession. Both use async I/O and yield
+        control to the event loop while waiting for the network. Alternatively,
+        wrap in loop.run_in_executor() to offload to a thread pool.
+    rationale: >
+      The requests library is synchronous by design — every HTTP call blocks
+      the calling thread at the OS level. In asyncio, the event loop runs on
+      a single thread; a blocked thread means a blocked event loop. httpx is
+      the modern replacement with an identical API and native async support.
+      aiohttp is the high-performance alternative for HTTP clients and servers.
+      Both integrate cleanly with asyncio without blocking the event loop.
+    severity: error
+    tags: [async, event-loop, http, performance, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern-either:
+              - pattern: requests.get(...)
+              - pattern: requests.post(...)
+              - pattern: requests.put(...)
+              - pattern: requests.delete(...)
+              - pattern: requests.request(...)
+              - pattern: requests.head(...)
+              - pattern: requests.patch(...)
+          - pattern-inside: |
+              async def $FUNC(...):
+                  ...
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**", "**/test_*.py", "**/*_test.py"]
+    fix:
+      message: Replace requests with httpx.AsyncClient or aiohttp.ClientSession for non-blocking HTTP.
+      example: |
+        # Before — blocks the event loop for every HTTP call
+        async def fetch_user(user_id: int) -> dict:
+            resp = requests.get(f"https://api.example.com/users/{user_id}")
+            return resp.json()
+
+        # After — non-blocking, event loop stays free
+        async def fetch_user(user_id: int) -> dict:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"https://api.example.com/users/{user_id}")
+                return resp.json()
+    references:
+      - https://www.python-httpx.org/async/
+      - https://docs.aiohttp.org/en/stable/client_quickstart.html
+      - https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools
+
+  # ── Task lifecycle ──────────────────────────────────────────────
+
+  - id: py-asyncio-task-no-reference
+    name: asyncio.create_task() result not stored (fire-and-forget leak)
+    description: >
+      Flags asyncio.create_task() calls whose return value is not assigned
+      to a variable, returned, or added to a collection. Discarding the
+      Task reference means Python's garbage collector can destroy the task
+      before it completes, silently cancelling it mid-execution.
+    descriptions:
+      business: >
+        When a task is created but its reference is discarded, Python can
+        garbage collect it at any point — even while it is running. The task
+        silently disappears: the work it was doing stops, no exception is
+        raised, no log is written. This is a silent data loss bug that is
+        nearly impossible to reproduce in development (GC timing is
+        non-deterministic) and manifests as mysterious missing writes or
+        operations in production.
+      developer: >
+        asyncio.create_task() schedules a coroutine but the returned Task
+        object must be kept alive. If the Task is not referenced, the event
+        loop holds only a weak reference — the garbage collector can destroy
+        it during the next GC cycle, triggering task cancellation. Store the
+        task in a local variable, add it to a set, or await it. If you truly
+        want fire-and-forget, use a background task set: tasks = set(); t =
+        asyncio.create_task(coro()); tasks.add(t); t.add_done_callback(tasks.discard).
+    rationale: >
+      The CPython documentation explicitly warns: "Save a reference to the
+      result of this function, to avoid a task disappearing mid-execution.
+      The event loop only keeps weak references to tasks." Discarding the
+      Task reference is a latent bug: it works most of the time (GC doesn't
+      collect immediately) but fails randomly under GC pressure or in tests
+      that trigger GC explicitly. The canonical pattern is to maintain a
+      module-level set of background tasks and register a done callback to
+      auto-discard.
+    severity: error
+    tags: [async, task-management, correctness, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: asyncio.create_task(...)
+          - pattern-not: $VAR = asyncio.create_task(...)
+          - pattern-not: return asyncio.create_task(...)
+          - pattern-not: yield asyncio.create_task(...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Store the task reference to prevent garbage collection, or use the background-task set pattern.
+      example: |
+        # Before — task may be GC'd mid-execution
+        async def schedule_cleanup(session_id: str) -> None:
+            asyncio.create_task(cleanup_session(session_id))
+            return
+
+        # After — background task set keeps the reference alive
+        _background_tasks: set[asyncio.Task] = set()
+
+        async def schedule_cleanup(session_id: str) -> None:
+            task = asyncio.create_task(cleanup_session(session_id))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+    references:
+      - https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task
+      - https://docs.python.org/3/library/asyncio-task.html#asyncio.Task
+
+  # ── Error isolation ─────────────────────────────────────────────
+
+  - id: py-asyncio-gather-no-return-exceptions
+    name: asyncio.gather() without return_exceptions=True loses errors
+    description: >
+      Flags asyncio.gather() calls that do not pass return_exceptions=True.
+      Without it, any exception in one of the gathered coroutines cancels all
+      remaining coroutines and propagates to the caller, potentially hiding
+      errors from coroutines that hadn't finished yet.
+    descriptions:
+      business: >
+        When gathering multiple async operations and one fails, the default
+        behavior cancels all the remaining operations and raises the exception.
+        This means partially-completed work gets abandoned with no record of
+        which operations succeeded. With return_exceptions=True, all operations
+        run to completion, and the caller receives both results and exceptions
+        in a list — enabling per-item error handling without losing successful
+        results.
+      developer: >
+        asyncio.gather() without return_exceptions=True cancels all remaining
+        awaitables the moment any one raises. The caller gets the first
+        exception and loses visibility into the others' outcomes. With
+        return_exceptions=True, gather always returns a list of the same length
+        as the input — results for successes, exception objects for failures.
+        The caller can then filter, log, or handle each item independently.
+        This is especially important in batch processing pipelines.
+    rationale: >
+      asyncio.gather() with the default return_exceptions=False provides fail-
+      fast semantics: the first exception cancels all other coroutines. For
+      batch operations (sending notifications to many users, processing a list
+      of items), fail-fast means partial results are lost silently. With
+      return_exceptions=True, every item runs to completion and the caller
+      decides how to handle each outcome — retrying failures, alerting on
+      specific error types, or logging before raising. This is the correct
+      default for production batch code.
+    severity: warning
+    tags: [async, error-handling, reliability, python]
+    detector:
+      capability: semgrep
+      config:
+        language: python
+        patterns:
+          - pattern: asyncio.gather(...)
+          - pattern-not: asyncio.gather(..., return_exceptions=$BOOL, ...)
+    applies_to: ["**/*.py"]
+    excludes: ["**/venv/**", "**/.venv/**", "**/site-packages/**"]
+    fix:
+      message: Add return_exceptions=True and inspect the returned list for exceptions.
+      example: |
+        # Before — first failure cancels all remaining tasks
+        async def notify_all(user_ids: list[int]) -> None:
+            await asyncio.gather(*[notify_user(uid) for uid in user_ids])
+
+        # After — all tasks run, failures handled per-item
+        async def notify_all(user_ids: list[int]) -> None:
+            results = await asyncio.gather(
+                *[notify_user(uid) for uid in user_ids],
+                return_exceptions=True,
+            )
+            for uid, result in zip(user_ids, results):
+                if isinstance(result, Exception):
+                    logger.error("Failed to notify user %s: %s", uid, result)
+    references:
+      - https://docs.python.org/3/library/asyncio-task.html#asyncio.gather
