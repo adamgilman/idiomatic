@@ -32,4 +32,10 @@ type ToolInfo struct {
 type AnalysisRequest struct {
 	Files []string
 	Rules []manifest.Rule
+	// ProjectRoot is the directory containing the project's .idiomatic.yaml.
+	// Repo-root file checks (.gitignore, .git/HEAD) resolve against it so they
+	// don't depend on which file happened to trigger the scan. Empty when the
+	// root could not be determined; callers then fall back to the first file's
+	// directory.
+	ProjectRoot string
 }

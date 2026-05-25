@@ -179,7 +179,14 @@ func (c *Capability) runPerRule(ctx context.Context, req engine.AnalysisRequest)
 		return nil, err
 	}
 
-	project := projectRoot(files)
+	// Repo-root file checks (.gitignore, .git/HEAD) must resolve against the
+	// project root, not the directory of whichever file triggered the scan —
+	// otherwise editing a nested file makes grep/stat look for the file in that
+	// subdirectory and report a spurious miss.
+	project := req.ProjectRoot
+	if project == "" {
+		project = projectRoot(files)
+	}
 
 	results := make([]ruleOutput, 0, len(req.Rules))
 	for i := range req.Rules {

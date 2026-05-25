@@ -389,6 +389,84 @@ func TestEslint_Analyze_E2E_FakeBinary(t *testing.T) {
 	}
 }
 
+// TestFileContains_RepoRootResolvesAgainstProjectRoot is the regression guard
+// for the .gitignore/.env false positive: a repo-root file check (path
+// ".gitignore") must resolve against the project root, not the directory of
+// whichever file triggered the scan. Editing a nested file used to make grep
+// look for `<subdir>/.gitignore`, which is missing, firing the rule even
+// though the real repo-root .gitignore is correct.
+func TestFileContains_RepoRootResolvesAgainstProjectRoot(t *testing.T) {
+	if _, err := exec.LookPath("grep"); err != nil {
+		t.Skip("grep not available on PATH")
+	}
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(".env\n.env.local\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	subDir := filepath.Join(root, "internal", "foo")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(subDir, "bar.go")
+	if err := os.WriteFile(nested, []byte("package foo\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	caps, _ := LoadPath(repoCapabilitiesDir(t))
+	var fc *Capability
+	for _, c := range caps {
+		if c.Name() == "file-contains" {
+			fc = c
+		}
+	}
+	if fc == nil {
+		t.Fatal("file-contains capability not loaded")
+	}
+
+	rules := []manifest.Rule{{
+		ID:       "gitignore-env-files",
+		Severity: manifest.SeverityError,
+		Detector: manifest.Detector{
+			Capability: "file-contains",
+			Config: map[string]any{
+				"path":      ".gitignore",
+				"pattern":   "\\.env",
+				"fire_when": "signal.exit_code != 0",
+			},
+		},
+	}}
+
+	// With ProjectRoot set, the check resolves <root>/.gitignore (which has
+	// .env) and stays quiet even though only a nested file was scanned.
+	findings, err := fc.Analyze(context.Background(), engine.AnalysisRequest{
+		Files:       []string{nested},
+		Rules:       rules,
+		ProjectRoot: root,
+	})
+	if err != nil {
+		t.Fatalf("Analyze (with ProjectRoot): %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings with ProjectRoot set, got %d: %+v", len(findings), findings)
+	}
+
+	// Without ProjectRoot, the check falls back to the nested file's directory
+	// (<root>/internal/foo/.gitignore, which is missing) — the original false
+	// positive. This asserts the fallback path still resolves so the fix is
+	// what suppresses the spurious finding.
+	falsePos, err := fc.Analyze(context.Background(), engine.AnalysisRequest{
+		Files: []string{nested},
+		Rules: rules,
+	})
+	if err != nil {
+		t.Fatalf("Analyze (no ProjectRoot): %v", err)
+	}
+	if len(falsePos) != 1 {
+		t.Fatalf("expected the legacy false positive (1 finding) without ProjectRoot, got %d: %+v", len(falsePos), falsePos)
+	}
+}
+
 // TestPerLinter_Errcheck verifies the single-rule per-linter capability shape:
 // errcheck capability runs golangci-lint -E errcheck, finds the unchecked
 // error in the fixture, and attributes the finding to the pack rule that

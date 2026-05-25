@@ -14,8 +14,9 @@ import (
 )
 
 type CapabilityBackendAdapter struct {
-	cap  Capability
-	name string
+	cap         Capability
+	name        string
+	projectRoot string
 }
 
 func NewCapabilityBackendAdapter(cap Capability, name string) *CapabilityBackendAdapter {
@@ -24,9 +25,14 @@ func NewCapabilityBackendAdapter(cap Capability, name string) *CapabilityBackend
 
 func (a *CapabilityBackendAdapter) Name() string { return a.name }
 
+// SetProjectRoot records the directory containing the project's
+// .idiomatic.yaml so it can be threaded into every AnalysisRequest.
+func (a *CapabilityBackendAdapter) SetProjectRoot(root string) { a.projectRoot = root }
+
 func (a *CapabilityBackendAdapter) Analyze(ctx context.Context, files []string, rules []manifest.Rule) ([]Finding, error) {
 	return a.cap.Analyze(ctx, AnalysisRequest{
-		Files: files,
-		Rules: rules,
+		Files:       files,
+		Rules:       rules,
+		ProjectRoot: a.projectRoot,
 	})
 }

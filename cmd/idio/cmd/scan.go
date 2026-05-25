@@ -125,7 +125,7 @@ func NewCmdScan() *cobra.Command {
 				return emitErrorAndExit(formatter, rules, files, meta, err.Error(), formatFlag)
 			}
 
-			backends := registry.BuildBackends()
+			backends := registry.BuildBackends(filepath.Dir(cfgPath))
 
 			rulesByCapability := make(map[string][]manifestlib.Rule)
 			for _, rule := range rules {
@@ -218,7 +218,11 @@ func runClaudeHook(ctx context.Context, cmd *cobra.Command, configPath string, m
 		registry = declarative.NewRegistry()
 	}
 
-	backends := registry.BuildBackends()
+	projectRoot := ""
+	if cfgPath != "" {
+		projectRoot = filepath.Dir(cfgPath)
+	}
+	backends := registry.BuildBackends(projectRoot)
 
 	resp, _ := claudehook.Run(ctx, stdinData, backends, registry, rules, meta)
 	if len(resp) > 0 {
