@@ -67,13 +67,19 @@ func (r *Registry) Names() []string {
 // registered. Capabilities whose binary is missing are silently skipped —
 // the routing layer downstream emits a clear error if a manifest requires
 // a missing one.
-func (r *Registry) BuildBackends() map[string]engine.Backend {
+// projectRoot is the directory containing the project's .idiomatic.yaml; it is
+// threaded into each adapter so repo-root file checks (.gitignore, .git/HEAD)
+// resolve consistently regardless of which file triggered the scan. Pass "" if
+// unknown.
+func (r *Registry) BuildBackends(projectRoot string) map[string]engine.Backend {
 	backends := make(map[string]engine.Backend, len(r.caps))
 	for _, c := range r.caps {
 		if _, err := c.Detect(); err != nil {
 			continue
 		}
-		backends[c.Name()] = engine.NewCapabilityBackendAdapter(c, c.Name())
+		adapter := engine.NewCapabilityBackendAdapter(c, c.Name())
+		adapter.SetProjectRoot(projectRoot)
+		backends[c.Name()] = adapter
 	}
 	return backends
 }
