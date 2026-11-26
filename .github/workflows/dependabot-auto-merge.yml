@@ -1,0 +1,24 @@
+name: Dependabot auto-merge
+
+# Turns on GitHub auto-merge for every Dependabot pull request. The PR is
+# merged by GitHub only once the required status checks on main pass
+# (build-and-test); a failing PR stays open for a human to look at.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Enable auto-merge
+        run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
