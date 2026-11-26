@@ -11,7 +11,7 @@ Run `which idio` or `idio version`. If not found, tell the user:
 ```
 idio is not installed. Install it with:
 
-  brew install adamgilman/tap/idio
+  brew install adamgilman/tap/idiomatic
 
 or:
 

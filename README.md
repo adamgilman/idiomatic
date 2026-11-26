@@ -13,7 +13,7 @@ Idiomatic runs alongside AI coding agents like Claude Code. After every file edi
 **Homebrew (macOS and Linux):**
 
 ```bash
-brew install adamgilman/tap/idio
+brew install adamgilman/tap/idiomatic
 ```
 
 **From source:**
