@@ -44,6 +44,11 @@ jobs:
           version: v2.11.4
 
       - name: Vulnerability scan
+        # govulncheck@latest can require a newer Go than go.mod pins, and
+        # newer actions/setup-go releases set GOTOOLCHAIN=local, which
+        # blocks the automatic toolchain download.
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
